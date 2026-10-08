@@ -35,8 +35,8 @@ static int releasePort;
 
 static void apiConfigure(void) {
 
-  cpClientCa = getenv("WX_CP_CLIENT_CA");
-  cpClientSubject = getenv("WX_CP_CLIENT_SUBJECT");
+  cpClientCa = env("WX_CP_CLIENT_CA", NULL);
+  cpClientSubject = env("WX_CP_CLIENT_SUBJECT", NULL);
 
   if (!readSecret(env("WX_CP_TOKEN_FILE", "/secrets/cp-token"), cpToken, sizeof cpToken))
     fprintf(stderr, "wx1-keyagent: no control plane token, its API is closed\n");
@@ -401,13 +401,13 @@ static void apiRoutes(void) {
    * out is sealed to an attested guest end to end, and TLS there means a CA
    * the guest image has to pin.
    */
-  const char *cert = getenv("WX_TLS_CERT"), *key = getenv("WX_TLS_KEY");
+  const char *cert = env("WX_TLS_CERT", NULL), *key = env("WX_TLS_KEY", NULL);
   bool tls = cert != NULL && cert[0] != 0 && key != NULL && key[0] != 0;
 
   if (tls) {
     http.tls(cert, key);
-    if (getenv("WX_CP_CLIENT_CA") != NULL && getenv("WX_CP_CLIENT_CA")[0] != 0)
-      http.tlsClients(getenv("WX_CP_CLIENT_CA"));
+    if (env("WX_CP_CLIENT_CA", NULL) != NULL)
+      http.tlsClients(env("WX_CP_CLIENT_CA", NULL));
   }
 
   apiPort = listenAll(env("WX_API_LISTEN", "127.0.0.1:8095"), tls);

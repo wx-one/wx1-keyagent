@@ -59,6 +59,9 @@ req() { jq -n --arg t "$1" --argjson p "$2" '{type: $t, payload: $p}' | cp_ -X P
 st() { jq -r '"\(.status) \(.reason)"'; }
 decide() { cu -X POST -d "{\"approve\":$2}" "$A/api/customer/requests/$(echo "$1" | jq .id)" | st; }
 
+echo "--- the worker"
+expect "a worker sees the trust store (SSL_CERT_FILE)" "$(curl -s "${CA[@]}" "$A/health")" '"trustStore":"/[^"]+"'
+
 echo "--- tokens"
 expect "no token" "$(TOKEN=x req create '{}')" unauthorized
 expect "customer token cannot file" "$(curl -s "${CA[@]}" -H 'Authorization: Bearer customer-secret' -d '{}' "$A/api/requests")" unauthorized

@@ -14,12 +14,78 @@
 #include <stdlib.h>
 #include <string.h>
 
+/**
+ * The settings, kept from the master.
+ *
+ * nginx starts its workers with the environment cleared, and the way back -
+ * meta's http.env - takes a fixed number of names and dropped the rest
+ * without a word: the 17th setting simply was not there in a worker. So the
+ * agent does not depend on it. nginx's master runs main() and forks every
+ * worker afterwards, so what main() copies into this table every worker
+ * inherits, however many settings there are.
+ */
+#define ENV_KEPT 64
+
+static struct {
+  const char *name;
+  char *value;
+} envKept[ENV_KEPT];
+
+static int envKeptCount;
+
+/**
+ * Copies these settings out of the environment, in main(). main() runs in
+ * every worker again, with the environment cleared there: what the master
+ * kept is inherited and stays.
+ */
+static void envKeep(const char *const *names) {
+
+  if (envKeptCount > 0)
+    return;
+
+  for (; *names != NULL && envKeptCount < ENV_KEPT; ++names) {
+    const char *v = getenv(*names);
+    envKept[envKeptCount].name = *names;
+    envKept[envKeptCount].value = v != NULL ? strdup(v) : NULL;
+    ++envKeptCount;
+  }
+
+  if (*names != NULL) {
+    fprintf(stderr, "wx1-keyagent: more than %d settings to keep\n", ENV_KEPT);
+    exit(1);
+  }
+}
+
 /** A setting, with what it is when nobody set it. Empty counts as unset. */
 static const char *env(const char *name, const char *otherwise) {
 
-  const char *v = getenv(name);
+  const char *v = NULL;
+  bool kept = false;
+
+  for (int i = 0; i < envKeptCount; ++i)
+    if (strcmp(envKept[i].name, name) == 0) {
+      v = envKept[i].value;
+      kept = true;
+      break;
+    }
+
+  if (!kept)
+    v = getenv(name);
 
   return v != NULL && v[0] != 0 ? v : otherwise;
+}
+
+/**
+ * What a library reads from the environment itself - OpenSSL its trust
+ * store, the C library the time zone - put back in a worker.
+ */
+static void envRestore(const char *const *names) {
+
+  for (; *names != NULL; ++names) {
+    const char *v = env(*names, NULL);
+    if (v != NULL)
+      setenv(*names, v, 1);
+  }
 }
 
 /**

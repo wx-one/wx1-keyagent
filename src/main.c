@@ -17,7 +17,13 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* what libraries read from the environment themselves, back in each worker */
+static const char *const libraryEnvironment[] = {"SSL_CERT_FILE", "SSL_CERT_DIR", "TZ", NULL};
+
 static int startWorker(void) {
+
+  envRestore(libraryEnvironment);
+  tzset();
 
   if (!baoConfigure())
     fprintf(stderr, "wx1-keyagent: no OpenBao token\n");
@@ -38,7 +44,6 @@ static http_response_t health(http_request_t *req) {
     return req.reply(404).text("");
 
   static char body[512];
-  char hash[65];
   bool db = false;
 
   {
@@ -56,12 +61,15 @@ static http_response_t health(http_request_t *req) {
   int baoStatus = bao.status;
   bao.release();
 
-  sha256Hex("wx1-keyagent", strlen("wx1-keyagent"), hash);
+  /* the trust store this worker's OpenSSL reads - the one fetching AMD's
+     certificates over HTTPS - as OpenSSL itself sees it */
+  const char *trust = getenv("SSL_CERT_FILE");
+  bool trustReadable = trust != NULL && access(trust, R_OK) == 0;
 
   obj answer = {
     database: db,
     openbao: baoStatus,
-    sha256: hash,
+    trustStore: trustReadable ? trust : "",
   };
 
   answer.toJSON(body, sizeof body);
@@ -71,30 +79,21 @@ static http_response_t health(http_request_t *req) {
 
 int main(void) {
 
-  http.env("WX_DB");
-  http.env("WX_OPENBAO_URL");
-  http.env("WX_OPENBAO_TOKEN_FILE");
-  http.env("WX_CP_TOKEN_FILE");
-  http.env("WX_CUSTOMER_TOKEN_FILE");
-  http.env("WX_KBS_ADMIN_URL");
-  http.env("WX_KBS_ADMIN_TOKEN_FILE");
-  http.env("WX_RELEASE_GUEST_URL");
-  http.env("WX_REFS");
-  http.env("WX_KDS");
-  http.env("WX_SNP_PRODUCT");
-  http.env("WX_LEASE_TTL");
-  http.env("TZ");
-  http.env("WX_UI_PASSWORD_FILE");
-  http.env("WX_CP_CLIENT_CA");
-  http.env("WX_CP_CLIENT_SUBJECT");
-  /* the trust store the release's own OpenSSL uses (bin/wx1-keyagent finds it) */
-  http.env("SSL_CERT_FILE");
-  http.env("SSL_CERT_DIR");
+  /* every setting, kept here in the master; the workers inherit the copy */
+  static const char *const settings[] = {
+      "WX_DB", "WX_DB_DRIVER", "WX_OPENBAO_URL", "WX_OPENBAO_TOKEN_FILE",
+      "WX_CP_TOKEN_FILE", "WX_CUSTOMER_TOKEN_FILE", "WX_UI_PASSWORD_FILE",
+      "WX_KBS_ADMIN_URL", "WX_KBS_ADMIN_TOKEN_FILE", "WX_RELEASE_GUEST_URL", "WX_REFS",
+      "WX_KDS", "WX_SNP_PRODUCT", "WX_LEASE_TTL", "WX_API_LISTEN", "WX_RELEASE_LISTEN",
+      "WX_RELEASE_TLS", "WX_TLS_CERT", "WX_TLS_KEY", "WX_CP_CLIENT_CA",
+      "WX_CP_CLIENT_SUBJECT", "WX_WORKERS", "TZ", "SSL_CERT_FILE", "SSL_CERT_DIR", NULL};
+
+  envKeep(settings);
 
   if (atoi(env("WX_WORKERS", "0")) > 0)
     http.workers(atoi(env("WX_WORKERS", "0")));
 
-  http.once(dbPrepare);
+  http.once(dbMigrate);
   http.eachWorker(startWorker);
 
   http.get("/health", health);
