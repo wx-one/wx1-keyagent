@@ -283,6 +283,7 @@ static const char *typeLabel(const char *type) {
       {"attach", "Volume an VM haengen"},
       {"add_host", "VM auf weiterem Host erlauben (Umzug)"},
       {"detach", "Disk von VM getrennt (VM geloescht oder Volume abgehaengt)"},
+      {"reprovision", "Hauptdisk neu installieren (alte Daten werden vernichtet)"},
       {"delete_disk", "Disk endgueltig loeschen"},
       {"unlock", "Neue VM-Instanz will die Disk entsperren"}};
 

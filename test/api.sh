@@ -132,6 +132,30 @@ expect "  remark" "$(sql "select checks::TEXT from requests where id = $(echo "$
 decide "$R" false >/dev/null
 expect "add_host from the pool: automatic" "$(req add_host "{\"vm_uuid\":\"$VM\",\"chip_id\":\"$CHIP\"}" | st)" "^applied"
 
+echo "--- reprovision"
+RVM=$(uuid)
+req create "$(payload "$RVM" "$W/ud-safe")" >/dev/null
+OLDHD=$(bao kv get -format=json "wx/attachments/vm-$RVM" | jq -r .data.data.host_data)
+K0=$(bao read -format=json "kv/disk/vm-$RVM/key" | jq -c .data.data)
+printf '#cloud-config\nhostname: neu\nusers:\n  - name: tobi\n    ssh_authorized_keys:\n      - %s\n' "$KEY" > "$W/ud-new"
+expect "another VM's disk" "$(req reprovision "$(DISK=vm-$RVM payload "$(uuid)" "$W/ud-new" "vm-$RVM:new")" | st)" "rejected.*attached to this VM"
+expect "named as existing" "$(req reprovision "$(payload "$RVM" "$W/ud-new" "vm-$RVM:existing")" | st)" "rejected.*as 'new'"
+R=$(req reprovision "$(payload "$RVM" "$W/ud-new")")
+expect "never automatic, even with auto rules" "$(echo "$R" | st)" "^pending"
+expect "  warns what it does" "$(sql "select checks::TEXT from requests where id = $(echo "$R" | jq .id)")" "gone for good"
+expect "  customer approves" "$(decide "$R" true)" "^applied"
+expect "  disk key overwritten" "$([ "$K0" != "$(bao read -format=json "kv/disk/vm-$RVM/key" | jq -c .data.data)" ] && echo yes)" "^yes$"
+expect "  old vTPM gone" "$(bao kv get "wx/vtpm/$OLDHD" >/dev/null 2>&1 && echo yes || echo no)" "^no$"
+NEWHD=$(bao kv get -format=json "wx/attachments/vm-$RVM" | jq -r .data.data.host_data)
+expect "  bound to the new initdata" "$([ "$NEWHD" != "$OLDHD" ] && echo yes)" "^yes$"
+expect "  with a vTPM of its own" "$(bao read -format=json "kv/vtpm/$NEWHD/state" | jq '.data.data | length')" "^32$"
+DV=vol-$(uuid)
+req create_volume "{\"disk_id\":\"$DV\"}" >/dev/null
+expect "data volume attached to it" "$(req attach "$(DISK=$DV payload "$RVM" "$W/ud-new")" | st)" "^applied"
+R=$(req reprovision "$(DISK=$DV payload "$RVM" "$W/ud-new" "$DV:new")")
+expect "a data volume is not the main disk" "$(echo "$R" | st)" "rejected.*main disk"
+expect "  and nothing else is wrong with it" "$(echo "$R" | st)" "^rejected checks failed: it is the VM's main disk$"
+
 echo "--- races"
 V2=vol-$(uuid)
 req create_volume "{\"disk_id\":\"$V2\"}" >/dev/null

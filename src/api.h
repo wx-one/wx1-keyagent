@@ -83,7 +83,7 @@ static http_response_t refused(http_request_t *req, int code, const char *why) {
 }
 
 static const char *const requestTypes[] = {"create", "create_volume", "attach", "add_host",
-                                           "detach", "delete_disk"};
+                                           "detach", "reprovision", "delete_disk"};
 
 /** POST /api/requests {type, payload}: the control plane files a request. */
 static http_response_t apiSubmit(http_request_t *req) {

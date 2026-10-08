@@ -22,6 +22,10 @@
  *               until it has been booted from once and "existing" after, and
  *               with the VM's vTPM. Any other volume is the customer's own
  *               business inside the VM; the release serves it all the same.
+ *
+ * reprovision installs the VM's main disk afresh: never automatic, and the
+ * old key and the old vTPM state are shredded before the new binding exists,
+ * so nothing of the old installation can be read again.
  */
 #ifndef WX_REQUESTS_H
 #define WX_REQUESTS_H
@@ -424,6 +428,16 @@ static bool validate(checks_t *checks, const char *type, json_t p) {
     automatic = true;
   } else if (strcmp(type, "unlock") == 0) {
     checks.ok(att.found, "disk is attached to a VM");
+  } else if (strcmp(type, "reprovision") == 0) {
+    /* what is on the disk is gone after this: the customer decides, always */
+    bool main = att.found && (isSystemDisk(diskId) || att.payload().get("main").truth());
+    checks.ok(active, "disk exists");
+    checks.ok(attachedTo != NULL && strcmp(attachedTo, p.get("vm_uuid").text()) == 0,
+              "disk is attached to this VM");
+    checks.ok(main, "it is the VM's main disk");
+    checkCloudInit(checks, p, &settings);
+    checkInitdata(checks, p, diskId, "new", hostData);
+    checks.note("approving shreds the disk's key and the VM's vTPM state: the data on it is gone for good");
   } else if (strcmp(type, "delete_disk") == 0) {
     checks.ok(active, "disk exists");
     checks.ok(!att.found, "disk attached to no VM");
@@ -521,6 +535,7 @@ static const char *attach(json_t p, const char *diskId, bool withVtpm) {
   yyjson_mut_arr_add_strcpy(doc, chips, p.get("chip_id").text() ?: "");
   yyjson_mut_obj_add_val(doc, a, "chip_ids", chips);
   yyjson_mut_obj_add_int(doc, a, "created", (int64_t)time(NULL));
+  yyjson_mut_obj_add_bool(doc, a, "main", withVtpm);
 
   text_t at = TEXT`attachments/${diskId}`;
   at.into(key, sizeof key);
@@ -578,6 +593,37 @@ static bool addChip(yyjson_mut_doc *doc, yyjson_mut_val *root, void *with) {
   return yyjson_mut_arr_add_strcpy(doc, chips, chip);
 }
 
+/** A vTPM's state key overwritten, its entry and replay stand gone. */
+static bool shredVtpm(const char *hostData) {
+  return newVtpmKey(hostData) && storeDrop("vtpm", hostData) && storeDrop("replay", hostData);
+}
+
+/**
+ * A fresh installation on the VM's main disk: the old key and the old vTPM
+ * state shredded, then bound again as new with the initdata sent.
+ */
+static const char *reprovision(json_t p, const char *diskId) {
+
+  bao_entry_t att = storeGet("attachments", diskId);
+  char oldHd[80];
+  text_t t = TEXT`${att.found ? att.payload().get("host_data").text() : ""}`;
+  t.into(oldHd, sizeof oldHd);
+  att.release();
+
+  if (!newDiskKey(diskId))
+    return "cannot overwrite the disk key (OpenBao)";
+
+  if (isHex(oldHd, 64) && !shredVtpm(oldHd))
+    return "cannot shred the old vTPM state (OpenBao)";
+
+  if (!storeDrop("attachments", diskId))
+    return "cannot remove the old binding (OpenBao)";
+
+  storeResetLease(diskId);
+
+  return attach(p, diskId, true);
+}
+
 /** Crypto-shredding: the keys are overwritten (KV v1 keeps no versions). */
 static const char *deleteDisk(const char *diskId) {
 
@@ -622,7 +668,7 @@ static const char *deleteDisk(const char *diskId) {
     if (!ours)
       continue;
 
-    if (!newVtpmKey(hd) || !storeDrop("vtpm", hd) || !storeDrop("replay", hd))
+    if (!shredVtpm(hd))
       wrong = "cannot shred a vTPM state key (OpenBao)";
   }
 
@@ -750,6 +796,11 @@ static const char *apply(const char *type, json_t p) {
        able to make the customer's backups of them unreadable */
     if (isSystemDisk(diskId))
       askToShred(diskId, p.get("vm_uuid").text(), p.get("vm_name").text());
+
+  } else if (strcmp(type, "reprovision") == 0) {
+
+    if ((wrong = reprovision(p, diskId)) != NULL)
+      return wrong;
 
   } else if (strcmp(type, "delete_disk") == 0) {
 
