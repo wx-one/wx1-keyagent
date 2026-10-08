@@ -21,6 +21,24 @@ echo -n ui-secret > "$W/secrets/ui-password"
 printf 'igvm_measurement=%s\nigvm_persist_measurement=%s\n' \
   "$(head -c 48 /dev/urandom | xxd -p -c 48)" "$(head -c 48 /dev/urandom | xxd -p -c 48)" > "$W/refs/manifest.txt"
 cp test/kbs-stub.py "$W/kbs/"
+
+# TLS for the API: a CA, the agent's certificate, the control plane's client
+# certificate, and a stranger's from another CA
+mkdir -p "$W/tls"
+(
+  cd "$W/tls"
+  key() { openssl req -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes "$@" 2>/dev/null; }
+  key -x509 -days 1 -subj /CN=wx-test-ca -keyout ca.key -out ca.pem
+  key -subj /CN=localhost -keyout agent.key -out agent.csr
+  printf 'subjectAltName=DNS:localhost,IP:127.0.0.1\n' > san
+  openssl x509 -req -in agent.csr -CA ca.pem -CAkey ca.key -CAcreateserial -days 1 -extfile san -out agent.pem 2>/dev/null
+  key -subj /CN=control-plane -keyout cp.key -out cp.csr
+  openssl x509 -req -in cp.csr -CA ca.pem -CAkey ca.key -CAcreateserial -days 1 -out cp.pem 2>/dev/null
+  key -subj /CN=other-plane -keyout other.key -out other.csr
+  openssl x509 -req -in other.csr -CA ca.pem -CAkey ca.key -CAcreateserial -days 1 -out other.pem 2>/dev/null
+  key -x509 -days 1 -subj /CN=stranger -keyout stranger.key -out stranger.pem
+  chmod a+r ./*
+)
 chmod -R a+rX "$W"; chmod 777 "$W/kbs" "$W/kds"
 
 docker network create $NET >/dev/null
@@ -43,14 +61,16 @@ $B policy write wx-keyagent - < deploy/openbao-policy.hcl >/dev/null
 $B token create -policy=wx-keyagent -field=token > "$W/secrets/openbao-token"
 
 docker run -d --name wxka-test-agent --network $NET -p 127.0.0.1::8095 \
-  -v "$W/secrets":/secrets:ro -v "$W/refs":/refs:ro -v "$W/kds":/kds \
+  -v "$W/secrets":/secrets:ro -v "$W/refs":/refs:ro -v "$W/kds":/kds -v "$W/tls":/tls:ro \
+  -e WX_TLS_CERT=/tls/agent.pem -e WX_TLS_KEY=/tls/agent.key \
+  -e WX_CP_CLIENT_CA=/tls/ca.pem -e WX_CP_CLIENT_SUBJECT=/CN=control-plane \
   -e WX_DB='postgresql://root@wxka-test-db:26257/keyagent?sslmode=disable' \
   -e WX_OPENBAO_URL=http://wxka-test-bao:8200 -e WX_KBS_ADMIN_URL=http://wxka-test-kbs:8090 \
   -e WX_API_LISTEN=0.0.0.0:8095 -e WX_RELEASE_LISTEN=0.0.0.0:8091 -e WX_WORKERS=2 \
   wx/keyagent-meta >/dev/null
 
 PORT=$(docker port wxka-test-agent 8095 | head -1 | cut -d: -f2)
-for i in $(seq 30); do curl -sf "http://127.0.0.1:$PORT/health" >/dev/null && break; sleep 1; done
+for i in $(seq 30); do curl -sf --cacert "$W/tls/ca.pem" "https://localhost:$PORT/health" >/dev/null && break; sleep 1; done
 
-WX_API="http://127.0.0.1:$PORT" WX_BAO=wxka-test-bao WX_DB_CONTAINER=wxka-test-db \
+WX_API="https://localhost:$PORT" WX_TLS="$W/tls" WX_BAO=wxka-test-bao WX_DB_CONTAINER=wxka-test-db \
   WX_POLICY="$W/kbs/policy.rego" test/api.sh

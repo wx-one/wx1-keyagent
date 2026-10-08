@@ -17,6 +17,15 @@ static char cpToken[256];
 static char customerToken[256];
 
 /**
+ * With WX_CP_CLIENT_CA the control plane has to show a client certificate
+ * from that CA as well as its token - optionally with this exact subject
+ * (WX_CP_CLIENT_SUBJECT, e.g. "/CN=cp.example"). The customer's routes and
+ * the UI need none: a browser has no certificate.
+ */
+static const char *cpClientCa;
+static const char *cpClientSubject;
+
+/**
  * The API and the key release listen on ports of their own, and every
  * route checks which one a request came in on: VMs reach the release, and
  * nothing else of this agent.
@@ -26,12 +35,31 @@ static int releasePort;
 
 static void apiConfigure(void) {
 
+  cpClientCa = getenv("WX_CP_CLIENT_CA");
+  cpClientSubject = getenv("WX_CP_CLIENT_SUBJECT");
+
   if (!readSecret(env("WX_CP_TOKEN_FILE", "/secrets/cp-token"), cpToken, sizeof cpToken))
     fprintf(stderr, "wx-keyagent: no control plane token, its API is closed\n");
 
   if (!readSecret(env("WX_CUSTOMER_TOKEN_FILE", "/secrets/customer-token"), customerToken,
                   sizeof customerToken))
     fprintf(stderr, "wx-keyagent: no customer token, the customer API is closed\n");
+}
+
+static bool bearer(http_request_t *req, const char *token);
+
+/** The control plane: its token, and its certificate when one is required. */
+static bool fromControlPlane(http_request_t *req) {
+
+  if (!bearer(req, cpToken))
+    return false;
+
+  if (cpClientCa == NULL || cpClientCa[0] == 0)
+    return true;
+
+  return req->clientVerified &&
+         (cpClientSubject == NULL || cpClientSubject[0] == 0 ||
+          strcmp(req->clientSubject, cpClientSubject) == 0);
 }
 
 /** "Bearer <token>", compared in constant time. An empty token opens nothing. */
@@ -91,7 +119,7 @@ static http_response_t apiSubmit(http_request_t *req) {
   if (req->localPort != apiPort)
     return refused(req, 404, "not found");
 
-  if (!bearer(req, cpToken))
+  if (!fromControlPlane(req))
     return refused(req, 401, "unauthorized");
 
   json_t body = req.readJson();
@@ -130,7 +158,7 @@ static http_response_t apiState(http_request_t *req) {
   if (req->localPort != apiPort)
     return refused(req, 404, "not found");
 
-  if (!bearer(req, cpToken) && !bearer(req, customerToken))
+  if (!fromControlPlane(req) && !bearer(req, customerToken))
     return refused(req, 401, "unauthorized");
 
   buf_t state = {0};
@@ -335,7 +363,7 @@ static http_response_t releaseRelease(http_request_t *req) {
 }
 
 /** "addr:port,addr:port"; every entry must name the same port. */
-static int listenAll(const char *list) {
+static int listenAll(const char *list, bool tls) {
 
   char copy[512];
   int port = 0;
@@ -355,7 +383,10 @@ static int listenAll(const char *list) {
     port = p;
 
     /* listenOn holds the address rather than copying it */
-    http.listenOn(strdup(entry), p);
+    if (tls)
+      http.listenTls(strdup(entry), p);
+    else
+      http.listenOn(strdup(entry), p);
   }
 
   return port;
@@ -363,8 +394,25 @@ static int listenAll(const char *list) {
 
 static void apiRoutes(void) {
 
-  apiPort = listenAll(env("WX_API_LISTEN", "127.0.0.1:8095"));
-  releasePort = listenAll(env("WX_RELEASE_LISTEN", "127.0.0.1:8091"));
+  /**
+   * TLS for the API when there is a certificate: the control plane reaches
+   * it over a network the customer does not fully own (a VPN at best). The
+   * release stays as configured (WX_RELEASE_TLS=1 for TLS): what it hands
+   * out is sealed to an attested guest end to end, and TLS there means a CA
+   * the guest image has to pin.
+   */
+  const char *cert = getenv("WX_TLS_CERT"), *key = getenv("WX_TLS_KEY");
+  bool tls = cert != NULL && cert[0] != 0 && key != NULL && key[0] != 0;
+
+  if (tls) {
+    http.tls(cert, key);
+    if (getenv("WX_CP_CLIENT_CA") != NULL && getenv("WX_CP_CLIENT_CA")[0] != 0)
+      http.tlsClients(getenv("WX_CP_CLIENT_CA"));
+  }
+
+  apiPort = listenAll(env("WX_API_LISTEN", "127.0.0.1:8095"), tls);
+  releasePort = listenAll(env("WX_RELEASE_LISTEN", "127.0.0.1:8091"),
+                          tls && strcmp(env("WX_RELEASE_TLS", "0"), "1") == 0);
 
   if (apiPort <= 0 || releasePort <= 0 || apiPort == releasePort) {
     fprintf(stderr, "wx-keyagent: WX_API_LISTEN and WX_RELEASE_LISTEN need one port each, "

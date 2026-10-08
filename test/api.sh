@@ -6,8 +6,12 @@
 #   WX_BAO           the OpenBao container (dev mode, root token "root")
 #   WX_DB_CONTAINER  the CockroachDB container
 #   WX_POLICY        where the KBS stub writes the policy it was given
+#   WX_TLS           with TLS: the directory with ca.pem and the client certificates
 set -uo pipefail
 A=${WX_API:?} BAO=${WX_BAO:?} DBC=${WX_DB_CONTAINER:?} POLICY=${WX_POLICY:?}
+T=${WX_TLS:-}
+CA=() CPC=()
+[ -n "$T" ] && CA=(--cacert "$T/ca.pem") && CPC=(--cert "$T/cp.pem" --key "$T/cp.key")
 W=$(mktemp -d)
 trap 'rm -rf "$W"' EXIT
 
@@ -19,8 +23,8 @@ failed=0
 
 bao() { docker exec -i -e BAO_ADDR=http://127.0.0.1:8200 -e BAO_TOKEN=root "$BAO" bao "$@"; }
 sql() { docker exec "$DBC" cockroach sql --insecure -d keyagent --format=tsv -e "$1" | tail -n +2; }
-cp_() { curl -s -H "Authorization: Bearer ${TOKEN:-cp-secret}" -H 'content-type: application/json' "$@"; }
-cu() { curl -s -H "Authorization: Bearer customer-secret" -H 'content-type: application/json' "$@"; }
+cp_() { curl -s "${CA[@]}" "${CPC[@]}" -H "Authorization: Bearer ${TOKEN:-cp-secret}" -H 'content-type: application/json' "$@"; }
+cu() { curl -s "${CA[@]}" -H "Authorization: Bearer customer-secret" -H 'content-type: application/json' "$@"; }
 uuid() { cat /proc/sys/kernel/random/uuid; }
 
 # <what> <got> <extended regex it must match>
@@ -57,7 +61,18 @@ decide() { cu -X POST -d "{\"approve\":$2}" "$A/api/customer/requests/$(echo "$1
 
 echo "--- tokens"
 expect "no token" "$(TOKEN=x req create '{}')" unauthorized
-expect "customer token cannot file" "$(curl -s -H 'Authorization: Bearer customer-secret' -d '{}' "$A/api/requests")" unauthorized
+expect "customer token cannot file" "$(curl -s "${CA[@]}" -H 'Authorization: Bearer customer-secret' -d '{}' "$A/api/requests")" unauthorized
+if [ -n "$T" ]; then
+  echo "--- TLS"
+  cpTry() { curl -s "${CA[@]}" -H "Authorization: Bearer cp-secret" -H 'content-type: application/json' "$@" -d '{"type":"unlock","payload":{}}' "$A/api/requests"; }
+  expect "plain HTTP on the TLS port" "$(curl -s -o /dev/null -w '%{http_code}' "${A/https/http}/health")" "^400$"
+  expect "control plane token without its certificate" "$(cpTry)" unauthorized
+  expect "  with a certificate from the CA, another subject" "$(cpTry --cert "$T/other.pem" --key "$T/other.key")" unauthorized
+  expect "  with a stranger's certificate: refused by TLS" "$(cpTry --cert "$T/stranger.pem" --key "$T/stranger.key" -o /dev/null -w '%{http_code}')" "^400$"
+  expect "  with its certificate: through to the checks" "$(cpTry "${CPC[@]}")" "bad request"
+  expect "customer API needs no certificate" "$(cu -X POST "$A/api/customer/vtpm/zz/unbind")" "bad HOST_DATA"
+  expect "UI needs no certificate" "$(curl -s "${CA[@]}" -o /dev/null -w '%{http_code}' -u kunde:ui-secret "$A/settings")" "^200$"
+fi
 expect "unlock only from the release" "$(req unlock '{}')" "bad request"
 
 echo "--- system disks"

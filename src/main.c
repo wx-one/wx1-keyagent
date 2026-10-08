@@ -85,6 +85,8 @@ int main(void) {
   http.env("WX_LEASE_TTL");
   http.env("TZ");
   http.env("WX_UI_PASSWORD_FILE");
+  http.env("WX_CP_CLIENT_CA");
+  http.env("WX_CP_CLIENT_SUBJECT");
 
   if (atoi(env("WX_WORKERS", "0")) > 0)
     http.workers(atoi(env("WX_WORKERS", "0")));

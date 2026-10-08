@@ -24,7 +24,7 @@ RUN cd /src && /meta/meta -s -I /src -I /usr/include/postgresql -emit-each /addo
     && /meta/meta -s -I /src -I /usr/include/postgresql -module /addon main.c \
     && cp /addon-h/*.h /addon/
 RUN cd /nginx-${NGINX_VERSION} \
-    && ./configure --prefix=/opt/nginx --with-compat --with-cc-opt="-Wno-error -I/usr/include/postgresql -I/addon" \
+    && ./configure --prefix=/opt/nginx --with-compat --with-http_ssl_module --with-cc-opt="-Wno-error -I/usr/include/postgresql -I/addon" \
          --with-ld-opt="-lpq -lcurl -lcrypto -lyaml" \
          --without-http_rewrite_module --without-http_gzip_module \
          --add-dynamic-module=/addon >/dev/null \
