@@ -14,7 +14,6 @@ trap 'docker rm -f wxka-test-agent wxka-test-db wxka-test-bao wxka-test-kbs >/de
 [ -n "${NO_BUILD:-}" ] || ./build.sh >/dev/null
 
 mkdir -p "$W/secrets" "$W/refs" "$W/kbs" "$W/kds"
-echo -n root > "$W/secrets/openbao-token"
 echo -n cp-secret > "$W/secrets/cp-token"
 echo -n customer-secret > "$W/secrets/customer-token"
 echo -n kbs-secret > "$W/secrets/kbs-admin-token"
@@ -35,8 +34,13 @@ for i in $(seq 60); do
   docker exec wxka-test-db cockroach sql --insecure -e "create database if not exists keyagent" >/dev/null 2>&1 && break
   sleep 1
 done
-docker exec -e BAO_ADDR=http://127.0.0.1:8200 -e BAO_TOKEN=root wxka-test-bao \
-  bao secrets enable -version=1 -path=kv kv >/dev/null
+# as an operator would set it up: the KBS's kv/, the agent's wx/, and a token
+# with the agent's policy only - the tests run without root
+B="docker exec -i -e BAO_ADDR=http://127.0.0.1:8200 -e BAO_TOKEN=root wxka-test-bao bao"
+$B secrets enable -version=1 -path=kv kv >/dev/null
+$B secrets enable -version=2 -path=wx kv >/dev/null
+$B policy write wx-keyagent - < deploy/openbao-policy.hcl >/dev/null
+$B token create -policy=wx-keyagent -field=token > "$W/secrets/openbao-token"
 
 docker run -d --name wxka-test-agent --network $NET -p 127.0.0.1::8095 \
   -v "$W/secrets":/secrets:ro -v "$W/refs":/refs:ro -v "$W/kds":/kds \

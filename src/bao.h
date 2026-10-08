@@ -40,17 +40,25 @@ static fetch_answer_t baoCall(const char *method, const char *path, const char *
   return call.send();
 }
 
-/** Enables the KV v2 mount for the agent's state, if it is not there yet. */
+/**
+ * Whether the agent's state mount (wx/, KV v2) is there and usable.
+ *
+ * Enabled here if the token may (a root token in a test); a token with the
+ * agent's own policy (deploy/openbao-policy.hcl) may not, and then the
+ * operator enables it once. Either way it is checked by listing it: 200 or
+ * 404 (empty) means it answers.
+ */
 static bool baoEnsureStateMount(void) {
 
-  fetch_answer_t got = baoCall("POST", "sys/mounts/wx",
-                               "{\"type\":\"kv\",\"options\":{\"version\":\"2\"}}");
-  int status = got.status;
-  bool exists = got.body != NULL && strstr(got.body, "path is already in use") != NULL;
+  fetch_answer_t made = baoCall("POST", "sys/mounts/wx",
+                                "{\"type\":\"kv\",\"options\":{\"version\":\"2\"}}");
+  made.release();
 
+  fetch_answer_t got = baoCall("LIST", "wx/metadata/", NULL);
+  int status = got.status;
   got.release();
 
-  return status == 204 || status == 200 || exists;
+  return status == 200 || status == 404;
 }
 
 /* ------------------------------------------------------------ KV v2 state */

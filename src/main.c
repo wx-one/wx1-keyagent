@@ -22,7 +22,9 @@ static int startWorker(void) {
   if (!baoConfigure())
     fprintf(stderr, "wx-keyagent: no OpenBao token\n");
   else if (!baoEnsureStateMount())
-    fprintf(stderr, "wx-keyagent: cannot enable the state mount wx/ in OpenBao\n");
+    fprintf(stderr, "wx-keyagent: the state mount wx/ in OpenBao is missing or not ours: "
+                    "bao secrets enable -path=wx -version=2 kv, and a token with "
+                    "deploy/openbao-policy.hcl\n");
 
   apiConfigure();
   uiConfigure();
