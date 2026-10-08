@@ -9,27 +9,20 @@
  * stands on - the database, OpenBao and OpenSSL - and says which answered.
  */
 #include <meta_http.h>
-#include <meta_pg.h>
 
 #include "bao.h"
+#include "db.h"
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-static PGconn *database;
-
-static int connectToThings(void) {
+static int startWorker(void) {
 
   if (!baoConfigure())
     fprintf(stderr, "wx-keyagent: no OpenBao token\n");
 
-  database = meta_pgOpen(env("WX_DB", "postgresql://root@127.0.0.1:26257/keyagent?sslmode=disable"));
-
-  if (database == NULL)
-    fprintf(stderr, "wx-keyagent: this worker cannot reach the database\n");
-
-  return 0;
+  return dbConnect();
 }
 
 static http_response_t health(http_request_t *req) {
@@ -38,8 +31,10 @@ static http_response_t health(http_request_t *req) {
   char hash[65];
   bool db = false;
 
-  if (database != NULL) {
-    PGresult *r = database.query("select 1");
+  {
+    sql_t q = SQL`select 1`;
+    PGresult *r = dbAsk(&q);
+    q.release();
     db = r != NULL && PQresultStatus(r) == PGRES_TUPLES_OK;
   }
 
@@ -92,16 +87,34 @@ static http_response_t selftest(http_request_t *req) {
   return req.reply(200).text(said);
 }
 
+/** A slow statement, so that several at once show the connection is shared safely. */
+static http_response_t dbtest(http_request_t *req) {
+
+  sql_t q = SQL`select pg_sleep(0.2), count(*) from requests`;
+  PGresult *r = dbAsk(&q);
+  q.release();
+
+  if (r == NULL || PQresultStatus(r) != PGRES_TUPLES_OK)
+    return req.reply(500).text(database ? database.lastError() : "no database");
+
+  return req.reply(200).text("ok");
+}
+
 int main(void) {
 
   http.env("WX_DB");
   http.env("WX_OPENBAO_URL");
   http.env("WX_OPENBAO_TOKEN_FILE");
 
-  http.eachWorker(connectToThings);
+  if (atoi(env("WX_WORKERS", "0")) > 0)
+    http.workers(atoi(env("WX_WORKERS", "0")));
+
+  http.once(dbPrepare);
+  http.eachWorker(startWorker);
 
   http.get("/health", health);
   http.get("/selftest", selftest);
+  http.get("/dbtest", dbtest);
 
   http.listen(atoi(env("WX_PORT", "8095")));
 }
