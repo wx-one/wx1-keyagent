@@ -87,6 +87,9 @@ int main(void) {
   http.env("WX_UI_PASSWORD_FILE");
   http.env("WX_CP_CLIENT_CA");
   http.env("WX_CP_CLIENT_SUBJECT");
+  /* the trust store the release's own OpenSSL uses (bin/wx1-keyagent finds it) */
+  http.env("SSL_CERT_FILE");
+  http.env("SSL_CERT_DIR");
 
   if (atoi(env("WX_WORKERS", "0")) > 0)
     http.workers(atoi(env("WX_WORKERS", "0")));

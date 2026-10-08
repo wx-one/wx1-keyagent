@@ -30,6 +30,20 @@ events { worker_connections 64; }
 http { }
 CONF
 
+# OpenSSL is linked in and was built with a directory of its own, so it does
+# not read this host's openssl.cnf; the trust store is this host's, found
+# where each distribution keeps it
+if [ -z "${SSL_CERT_FILE:-}" ]; then
+  for ca in /etc/ssl/certs/ca-certificates.crt /etc/pki/tls/certs/ca-bundle.crt \
+            /etc/ssl/ca-bundle.pem /etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem /etc/ssl/cert.pem; do
+    if [ -r "$ca" ]; then
+      export SSL_CERT_FILE="$ca"
+      break
+    fi
+  done
+fi
+[ -n "${SSL_CERT_FILE:-}" ] || echo "wx1-keyagent: no CA bundle found; set SSL_CERT_FILE" >&2
+
 # the module reads this to write itself back into the configuration
 export META_HTTP_MODULE="$module"
 
