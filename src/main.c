@@ -10,9 +10,8 @@
  */
 #include <meta_http.h>
 #include <meta_pg.h>
-#include <meta_fetch.h>
 
-#include <openssl/evp.h>
+#include "bao.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -20,14 +19,10 @@
 
 static PGconn *database;
 
-static const char *env(const char *name, const char *otherwise) {
-
-  const char *v = getenv(name);
-
-  return v != NULL && v[0] != 0 ? v : otherwise;
-}
-
 static int connectToThings(void) {
+
+  if (!baoConfigure())
+    fprintf(stderr, "wx-keyagent: no OpenBao token\n");
 
   database = meta_pgOpen(env("WX_DB", "postgresql://root@127.0.0.1:26257/keyagent?sslmode=disable"));
 
@@ -35,18 +30,6 @@ static int connectToThings(void) {
     fprintf(stderr, "wx-keyagent: this worker cannot reach the database\n");
 
   return 0;
-}
-
-/** sha256 of a short text, hex, as the smallest proof OpenSSL is linked. */
-static void sha256Hex(const char *text, char out[65]) {
-
-  unsigned char digest[32];
-  unsigned int length = 0;
-
-  EVP_Digest(text, strlen(text), digest, &length, EVP_sha256(), NULL);
-
-  for (unsigned int i = 0; i < length; ++i)
-    snprintf(out + i * 2, 3, "%02x", digest[i]);
 }
 
 static http_response_t health(http_request_t *req) {
@@ -67,7 +50,7 @@ static http_response_t health(http_request_t *req) {
   int baoStatus = bao.status;
   bao.release();
 
-  sha256Hex("wx-keyagent", hash);
+  sha256Hex("wx-keyagent", 11, hash);
 
   obj answer = {
     database: db,
@@ -80,14 +63,45 @@ static http_response_t health(http_request_t *req) {
   return req.reply(db && baoStatus == 200 ? 200 : 503).json(body);
 }
 
+/** Exercises the OpenBao client: mount, write, read, check-and-set, keys. */
+static http_response_t selftest(http_request_t *req) {
+
+  static char said[512];
+  bool conflict = false;
+  unsigned char key[32], back[64];
+
+  bool mount = baoEnsureStateMount();
+  baoDestroy("selftest/x");
+  bool first = baoWrite("selftest/x", "{\"n\":1}", 0, &conflict);
+  bool again = baoWrite("selftest/x", "{\"n\":2}", 0, &conflict);
+  bao_entry_t e = baoRead("selftest/x");
+  long n = e.payload().get("n").number();
+  long version = e.version;
+  e.release();
+  bool update = baoWrite("selftest/x", "{\"n\":3}", version, NULL);
+
+  randomBytes(key, sizeof key);
+  bool put = baoPutKey("selftest/key", key, sizeof key);
+  long length = baoGetKey("selftest/key", back, sizeof back);
+  bool same = length == 32 && memcmp(key, back, 32) == 0;
+
+  snprintf(said, sizeof said,
+           "mount=%d first=%d again=%d(conflict=%d) n=%ld v=%ld update=%d key=%d/%d\n",
+           mount, first, again, conflict, n, version, update, put, same);
+
+  return req.reply(200).text(said);
+}
+
 int main(void) {
 
   http.env("WX_DB");
   http.env("WX_OPENBAO_URL");
+  http.env("WX_OPENBAO_TOKEN_FILE");
 
   http.eachWorker(connectToThings);
 
   http.get("/health", health);
+  http.get("/selftest", selftest);
 
   http.listen(atoi(env("WX_PORT", "8095")));
 }

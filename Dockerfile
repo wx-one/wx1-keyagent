@@ -19,9 +19,12 @@ RUN cd ${META_PATH} && cmake -DCMAKE_BUILD_TYPE=Release . >/dev/null \
 RUN curl -fsSL https://nginx.org/download/nginx-${NGINX_VERSION}.tar.gz | tar -xz -C /
 
 COPY src /src
-RUN /meta/meta -s -I /src -I /usr/include/postgresql -module /addon /src/main.c
+# die eigenen Header einzeln uebersetzen (sie enthalten meta-Syntax), dann das Programm
+RUN cd /src && /meta/meta -s -I /src -I /usr/include/postgresql -emit-each /addon-h *.h \
+    && /meta/meta -s -I /src -I /usr/include/postgresql -module /addon main.c \
+    && cp /addon-h/*.h /addon/
 RUN cd /nginx-${NGINX_VERSION} \
-    && ./configure --prefix=/opt/nginx --with-compat --with-cc-opt="-Wno-error -I/usr/include/postgresql" \
+    && ./configure --prefix=/opt/nginx --with-compat --with-cc-opt="-Wno-error -I/usr/include/postgresql -I/addon" \
          --with-ld-opt="-lpq -lcurl -lcrypto" \
          --without-http_rewrite_module --without-http_gzip_module \
          --add-dynamic-module=/addon >/dev/null \
