@@ -29,9 +29,12 @@ static const char *env(const char *name, const char *otherwise) {
  */
 static bool readSecret(const char *path, char *into, size_t room) {
 
+  if (room == 0)
+    return false;
+
   FILE *in = fopen(path, "r");
 
-  if (in == NULL || room == 0)
+  if (in == NULL)
     return false;
 
   if (fgets(into, (int)room, in) == NULL)
@@ -139,6 +142,42 @@ static void buf_t__html(buf_t *self, const char *text) {
     case '\'': buf_t__put(self, "&#39;"); break;
     default: buf_t__add(self, at, 1);
     }
+}
+
+/* ------------------------------------------------------------ identifiers */
+
+static bool isUuid(const char *s) {
+
+  if (s == NULL || strlen(s) != 36)
+    return false;
+
+  for (int i = 0; i < 36; ++i) {
+    bool dash = i == 8 || i == 13 || i == 18 || i == 23;
+    if (dash ? s[i] != '-' : !((s[i] >= '0' && s[i] <= '9') || (s[i] >= 'a' && s[i] <= 'f')))
+      return false;
+  }
+
+  return true;
+}
+
+static bool isHex(const char *s, size_t length) {
+
+  if (s == NULL || strlen(s) != length)
+    return false;
+
+  for (size_t i = 0; i < length; ++i)
+    if (!((s[i] >= '0' && s[i] <= '9') || (s[i] >= 'a' && s[i] <= 'f')))
+      return false;
+
+  return true;
+}
+
+/** Lowercase hex of any even, non-zero length. */
+static bool isHexText(const char *s) {
+
+  size_t length = s != NULL ? strlen(s) : 0;
+
+  return length > 0 && length % 2 == 0 && isHex(s, length);
 }
 
 /* -------------------------------------------------------------- encodings */

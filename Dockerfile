@@ -6,7 +6,7 @@ FROM debian:trixie AS build
 ARG NGINX_VERSION
 RUN apt-get update && apt-get install -y --no-install-recommends \
       build-essential cmake curl ca-certificates libpq-dev libcurl4-openssl-dev \
-      libssl-dev libpcre2-dev zlib1g-dev \
+      libssl-dev libpcre2-dev zlib1g-dev libyaml-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # meta selbst, aus seinem Git-Stand
@@ -25,7 +25,7 @@ RUN cd /src && /meta/meta -s -I /src -I /usr/include/postgresql -emit-each /addo
     && cp /addon-h/*.h /addon/
 RUN cd /nginx-${NGINX_VERSION} \
     && ./configure --prefix=/opt/nginx --with-compat --with-cc-opt="-Wno-error -I/usr/include/postgresql -I/addon" \
-         --with-ld-opt="-lpq -lcurl -lcrypto" \
+         --with-ld-opt="-lpq -lcurl -lcrypto -lyaml" \
          --without-http_rewrite_module --without-http_gzip_module \
          --add-dynamic-module=/addon >/dev/null \
     && make -j"$(nproc)" >/dev/null && make install >/dev/null \
@@ -33,7 +33,7 @@ RUN cd /nginx-${NGINX_VERSION} \
 
 FROM debian:trixie
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      libpq5 libcurl4t64 libssl3t64 libpcre2-8-0 zlib1g ca-certificates \
+      libpq5 libcurl4t64 libssl3t64 libpcre2-8-0 zlib1g libyaml-0-2 ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=build /opt/nginx /opt/nginx
 COPY --from=build /meta/meta-http /usr/local/bin/meta-http
