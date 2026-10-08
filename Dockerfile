@@ -9,12 +9,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       libssl-dev libpcre2-dev zlib1g-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# meta selbst, aus seinem Git-Stand. Unter demselben Pfad wie beim Entwickler: generated/
-# (die erste Bootstrap-Stufe) traegt absolute Pfade zu Runtime und builtinDefines.h
-ARG META_PATH=/home/tobi/serious_projects/metalanguage
+# meta selbst, aus seinem Git-Stand
+ARG META_PATH=/opt/meta
 COPY --from=meta . ${META_PATH}
 RUN cd ${META_PATH} && cmake -DCMAKE_BUILD_TYPE=Release . >/dev/null \
-    && make -j"$(nproc)" meta meta-http >/dev/null 2>&1 && ln -s ${META_PATH} /meta
+    && make -j"$(nproc)" meta meta-http >/dev/null 2>&1 && ln -s ${META_PATH} /meta \
+    && cat ${META_PATH}/META_COMMIT
 
 RUN curl -fsSL https://nginx.org/download/nginx-${NGINX_VERSION}.tar.gz | tar -xz -C /
 
@@ -35,8 +35,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY --from=build /opt/nginx /opt/nginx
 COPY --from=build /meta/meta-http /usr/local/bin/meta-http
 ENV META_HTTP_NGINX=/opt/nginx/sbin/nginx META_HTTP_PREFIX=/var/lib/wx-keyagent/nginx
-# nicht als root: nginx wechselt dann nicht den Benutzer, und der erste Worker darf dem
-# Master das SIGHUP schicken, mit dem er die von meta geschriebene Konfiguration laedt
+# nicht als root: nginx braucht keine Rechte, und Master und Worker laufen als ein Benutzer
 RUN useradd --system --home /var/lib/wx-keyagent wxka && mkdir -p /var/lib/wx-keyagent/nginx \
     && chown -R wxka /var/lib/wx-keyagent
 USER wxka
