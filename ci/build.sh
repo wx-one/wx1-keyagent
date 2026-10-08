@@ -26,8 +26,8 @@ STAGE=$WORK/$NAME
 [ -f "$META_ROOT/lib/libmeta_runtime.a" ] || { echo "no libmeta_runtime.a in $META_ROOT/lib" >&2; exit 2; }
 
 # meta-db-migrate: the migrations are compiled in, the library linked in
-export DBM_VERSION=0.2.0
-export DBM_SHA256=cb3052cc7eb48d30e5b97a0e4930969aff64cf771a138a515e1d4603b21c753c
+export DBM_VERSION=0.3.0
+export DBM_SHA256=639cc82b45b9fab45621c561ed87bb365d2f15714dc68b47640d89102017b925
 export DBM_URL=https://github.com/db-migrate/meta-db-migrate/releases/download/v$DBM_VERSION/meta-db-migrate-v$DBM_VERSION-linux-x86_64-glibc2.39.tar.gz
 export DBM=$OUT/meta-db-migrate-$DBM_VERSION
 if [ ! -f "$DBM/lib/libdbmigrate-core.a" ]; then

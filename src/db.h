@@ -25,9 +25,18 @@ static const char *dbDriver(void) {
   return env("WX_DB_DRIVER", "pg");
 }
 
+/* an error arrives as one entry of several lines (migration, step, the SQL
+   with a marker, the driver's fields): each gets the prefix, so a log
+   collector keeps them with the agent */
 static void dbMigrateSays(int level, const char *line) {
   (void)level;
-  fprintf(stderr, "wx1-keyagent: migrate: %s\n", line);
+  for (;;) {
+    const char *end = strchr(line, '\n');
+    int len = end ? (int)(end - line) : (int)strlen(line);
+    fprintf(stderr, "wx1-keyagent: migrate: %.*s\n", len, line);
+    if (!end || !end[1]) break;
+    line = end + 1;
+  }
 }
 
 /**
