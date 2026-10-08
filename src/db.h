@@ -46,6 +46,28 @@ static const char *const dbSchema[] = {
   " source TEXT NOT NULL DEFAULT '')",
 
   "CREATE INDEX IF NOT EXISTS releases_disk ON releases (disk_id, id)",
+
+  /* a key release in three calls, possibly on three workers. Of the secret
+     only its hash: what is here proves nothing to anyone who reads it */
+  "CREATE TABLE IF NOT EXISTS sessions ("
+  " id TEXT PRIMARY KEY,"
+  " disk_id TEXT NOT NULL,"
+  " nonce TEXT NOT NULL,"
+  " expires TIMESTAMPTZ NOT NULL,"
+  " renew BOOL NOT NULL,"
+  " ending BOOL NOT NULL,"
+  " stage TEXT NOT NULL,"
+  " secret_hash TEXT NOT NULL DEFAULT '',"
+  " quote_nonce TEXT NOT NULL DEFAULT '',"
+  " ak_pub TEXT NOT NULL DEFAULT '',"
+  " guest_pub TEXT NOT NULL DEFAULT '',"
+  " ek TEXT NOT NULL DEFAULT '',"
+  " persist BOOL NOT NULL DEFAULT false,"
+  " report_id TEXT NOT NULL DEFAULT '',"
+  " chip_id TEXT NOT NULL DEFAULT '',"
+  " host_data TEXT NOT NULL DEFAULT '')",
+
+  "CREATE INDEX IF NOT EXISTS sessions_expires ON sessions (expires)",
 };
 
 static const char *dbUrl(void) {

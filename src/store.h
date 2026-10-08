@@ -155,6 +155,7 @@ typedef struct {
   char nvName[80];
   long confirmed;
   long issued;
+  long at; /* when it was last confirmed */
   bool found;
   bool failed;
 } replay_t;
@@ -178,6 +179,7 @@ static replay_t storeReplay(const char *hostData) {
     name.into(stand.nvName, sizeof stand.nvName);
     stand.confirmed = p.get("confirmed").number();
     stand.issued = p.get("issued").number();
+    stand.at = p.get("at").number();
     entry.release();
   }
 
@@ -220,6 +222,8 @@ static bool replayStep(yyjson_mut_doc *doc, yyjson_mut_val *root, void *with) {
   yyjson_mut_obj_put(root, yyjson_mut_str(doc, "nv_name"), yyjson_mut_strcpy(doc, step->nvName));
   yyjson_mut_obj_put(root, yyjson_mut_str(doc, "confirmed"), yyjson_mut_sint(doc, step->seen));
   yyjson_mut_obj_put(root, yyjson_mut_str(doc, "issued"), yyjson_mut_sint(doc, step->next));
+  yyjson_mut_obj_remove_str(root, "at");
+  yyjson_mut_obj_put(root, yyjson_mut_str(doc, "at"), yyjson_mut_sint(doc, (int64_t)time(NULL)));
 
   return true;
 }
@@ -344,6 +348,22 @@ static bool storeHoldsLease(const char *disk, const char *reportId) {
     PQclear(r);
 
   return holds;
+}
+
+/** Whether this instance could take the lease: free, expired or its own. */
+static bool storeLeaseOpen(const char *disk, const char *reportId) {
+
+  sql_t q = SQL`select 1 from leases
+    where disk_id = ${disk} and report_id <> ${reportId} and expires >= now()`;
+
+  PGresult *r = dbAsk(&q);
+  q.release();
+  bool open = r != NULL && PQresultStatus(r) == PGRES_TUPLES_OK && PQntuples(r) == 0;
+
+  if (r != NULL)
+    PQclear(r);
+
+  return open;
 }
 
 /** A clean shutdown gives the lease back. */

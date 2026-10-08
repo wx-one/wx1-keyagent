@@ -5,8 +5,9 @@
  * keys and everything a key release depends on live in the customer's
  * OpenBao, history and leases in a database (PostgreSQL or CockroachDB).
  *
- * So far: the health check, and the API through which the provider files
- * requests and the customer decides them (api.h).
+ * The key release for the customer's VMs (release.h) on one port, the API
+ * through which the provider files requests and the customer decides them
+ * (api.h) on another, and a health check.
  */
 #include <meta_http.h>
 
@@ -29,6 +30,9 @@ static int startWorker(void) {
 }
 
 static http_response_t health(http_request_t *req) {
+
+  if (req->localPort != apiPort)
+    return req.reply(404).text("");
 
   static char body[512];
   char hash[65];
@@ -73,6 +77,10 @@ int main(void) {
   http.env("WX_KBS_ADMIN_TOKEN_FILE");
   http.env("WX_RELEASE_GUEST_URL");
   http.env("WX_REFS");
+  http.env("WX_KDS");
+  http.env("WX_SNP_PRODUCT");
+  http.env("WX_LEASE_TTL");
+  http.env("TZ");
 
   if (atoi(env("WX_WORKERS", "0")) > 0)
     http.workers(atoi(env("WX_WORKERS", "0")));
@@ -84,5 +92,5 @@ int main(void) {
 
   apiRoutes();
 
-  http.listen(atoi(env("WX_PORT", "8095")));
+
 }
