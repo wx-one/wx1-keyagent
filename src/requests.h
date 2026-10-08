@@ -17,6 +17,11 @@
  *               shred the key.
  *   vol-<uuid>  a volume of its own (create_volume), attached to at most one
  *               VM at a time (attach, detach), bound to that VM's HOST_DATA.
+ *               Attached with "boot": true it is the VM's main disk instead of
+ *               a system disk: named in the initdata as wx.disk.root, "new"
+ *               until it has been booted from once and "existing" after, and
+ *               with the VM's vTPM. Any other volume is the customer's own
+ *               business inside the VM; the release serves it all the same.
  */
 #ifndef WX_REQUESTS_H
 #define WX_REQUESTS_H
@@ -378,19 +383,32 @@ static bool validate(checks_t *checks, const char *type, json_t p) {
     checks.ok(!system, "not a system disk (that belongs to its VM)");
     checks.ok(!att.found, "disk attached to no other VM");
     bool safe = checkCloudInit(checks, p, &settings);
-    checkInitdata(checks, p, diskId, NULL, hostData);
+    bool boot = p.get("boot").truth();
 
-    /* a volume joins the VM as it is: the binding of the VM's system disk
-       knows its HOST_DATA, and the provider cannot name another one */
     char vmDisk[48];
     text_t vd = TEXT`vm-${p.get("vm_uuid").text()}`;
     vd.into(vmDisk, sizeof vmDisk);
     bao_entry_t vm = storeGet("attachments", vmDisk);
-    if (vm.found)
-      checks.ok(strcmp(vm.payload().get("host_data").text(), hostData) == 0,
-                "initdata is the VM's own (as bound to its system disk)");
-    else
-      checks.note("the VM has no system disk here; bound to the initdata as sent");
+
+    if (boot) {
+      /* the VM's main disk: once booted from, it is encrypted and never
+         "new" again - or an empty volume slipped in under its name would be
+         formatted with the customer's key */
+      bool booted = disk.found && disk.payload().get("booted").truth();
+      checkInitdata(checks, p, diskId, booted ? "existing" : "new", hostData);
+      checks.ok(!vm.found, "the VM has no system disk (it boots from this volume)");
+    } else {
+      checkInitdata(checks, p, diskId, NULL, hostData);
+
+      /* a volume joins the VM as it is: the binding of the VM's system disk
+         knows its HOST_DATA, and the provider cannot name another one */
+      if (vm.found)
+        checks.ok(strcmp(vm.payload().get("host_data").text(), hostData) == 0,
+                  "initdata is the VM's own (as bound to its system disk)");
+      else
+        checks.note("the VM has no system disk here; bound to the initdata as sent");
+    }
+
     vm.release();
 
     automatic = settings.flag("auto_attach") && safe && inPool;
@@ -691,8 +709,17 @@ static const char *apply(const char *type, json_t p) {
 
   } else if (strcmp(type, "attach") == 0) {
 
-    if ((wrong = attach(p, diskId, false)) != NULL)
+    bool boot = p.get("boot").truth();
+
+    /* booted from, it gets the VM's vTPM; a data volume finds the VM's own */
+    if ((wrong = attach(p, diskId, boot)) != NULL)
       return wrong;
+
+    if (boot) {
+      json_t booted = meta_toJSON("{\"booted\":true}");
+      storeSet("disks", diskId, booted);
+      booted.release();
+    }
 
     /* a delete racing this one: whoever comes second sees the other */
     bao_entry_t disk = storeGet("disks", diskId);

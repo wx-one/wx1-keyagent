@@ -92,6 +92,24 @@ expect "  bound to the VM's HOST_DATA" "$(bao kv get -format=json "wx/attachment
 expect "  decided once only" "$(decide "$R" false)" "^applied"
 expect "detach volume" "$(req detach "{\"disk_id\":\"$VOL\",\"vm_uuid\":\"$VM\"}" | st)" "^applied"
 
+echo "--- a volume as the main disk"
+BV=vol-$(uuid) BVM=$(uuid)
+req create_volume "{\"disk_id\":\"$BV\"}" >/dev/null
+bootPayload() { DISK=$BV payload "$1" "$W/ud-safe" "$BV:$2" | jq '. + {boot: true}'; }
+expect "boot volume named as existing before its first boot" "$(req attach "$(bootPayload "$BVM" existing)" | st)" "rejected.*as 'new'"
+expect "boot volume, VM with a system disk" "$(req attach "$(bootPayload "$VM" new)" | st)" "rejected.*boots from this volume"
+R=$(req attach "$(bootPayload "$BVM" new)")
+expect "boot volume as new" "$(echo "$R" | st)" "^pending"
+expect "  customer approves" "$(decide "$R" true)" "^applied"
+BHD=$(bao kv get -format=json "wx/attachments/$BV" | jq -r .data.data.host_data)
+expect "  with the VM's vTPM" "$(bao read -format=json "kv/vtpm/$BHD/state" | jq '.data.data | length')" "^32$"
+expect "  marked as booted from" "$(bao kv get -format=json "wx/disks/$BV" | jq -r .data.data.booted)" "^true$"
+req detach "{\"disk_id\":\"$BV\",\"vm_uuid\":\"$BVM\"}" >/dev/null
+expect "  the VM goes: no shredding asked for a volume" "$(sql "select count(*) from requests where type = 'delete_disk' and payload->>'disk_id' = '$BV'")" "^0$"
+BVM2=$(uuid)
+expect "booted volume again as new" "$(req attach "$(bootPayload "$BVM2" new)" | st)" "rejected.*as 'existing'"
+expect "booted volume to a new VM as existing" "$(req attach "$(bootPayload "$BVM2" existing)" | st)" "^pending"
+
 echo "--- auto rules"
 jq -n --arg k "$KEY" --arg c "$CHIP" --arg hv "$HV" \
   '{auto_attach: true, auto_add_host: true, allowed_ssh_keys: [$k], host_pool: [{hv_uuid: $hv, chip_id: $c, name: "hv1"}]}' \
