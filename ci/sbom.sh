@@ -14,7 +14,7 @@
 #       digest; it carries a signed SBOM of its own.
 #
 # Needs jq. Reads DEPS (ci/deps.sh prefix), META_ROOT, META_REF, NGINX_VERSION,
-# NGINX_SHA256 and NGINX_URL from the environment.
+# NGINX_SHA256, NGINX_URL and DBM_VERSION, DBM_URL, DBM_SHA256 from the environment.
 set -euo pipefail
 
 licence_of() {
@@ -64,6 +64,8 @@ release)
   done < "$DEPS/SOURCES"
 
   comps+=("$(component nginx "$NGINX_VERSION" "$NGINX_URL" "$NGINX_SHA256" BSD-2-Clause "built from source; carries the agent as a module")")
+
+  comps+=("$(component meta-db-migrate "$DBM_VERSION" "$DBM_URL" "$DBM_SHA256" MIT "libdbmigrate-core and its cockroachdb/pg driver, linked statically with the migrations from migrations/")")
 
   yyjson=$(sed -n 's/^#define YYJSON_VERSION_STRING "\(.*\)"/\1/p' "$META_ROOT/runtime/vendor/yyjson/yyjson.h")
   comps+=("$(component yyjson "$yyjson" "" "" MIT "vendored in the meta runtime, linked statically")")

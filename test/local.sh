@@ -66,6 +66,7 @@ docker run -d --name wx1ka-test-agent --network $NET -p 127.0.0.1::8095 \
   -e WX_TLS_CERT=/tls/agent.pem -e WX_TLS_KEY=/tls/agent.key \
   -e WX_CP_CLIENT_CA=/tls/ca.pem -e WX_CP_CLIENT_SUBJECT=/CN=control-plane \
   -e WX_DB='postgresql://root@wx1ka-test-db:26257/keyagent?sslmode=disable' \
+  -e WX_DB_DRIVER=cockroachdb \
   -e WX_OPENBAO_URL=http://wx1ka-test-bao:8200 -e WX_KBS_ADMIN_URL=http://wx1ka-test-kbs:8090 \
   -e WX_API_LISTEN=0.0.0.0:8095 -e WX_RELEASE_LISTEN=0.0.0.0:8091 -e WX_WORKERS=2 \
   "$IMAGE" >/dev/null

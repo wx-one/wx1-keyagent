@@ -25,13 +25,26 @@ STAGE=$WORK/$NAME
 [ -x "$META_ROOT/meta" ] || { echo "no meta at $META_ROOT" >&2; exit 2; }
 [ -f "$META_ROOT/lib/libmeta_runtime.a" ] || { echo "no libmeta_runtime.a in $META_ROOT/lib" >&2; exit 2; }
 
+# meta-db-migrate: the migrations are compiled in, the library linked in
+export DBM_VERSION=0.2.0
+export DBM_SHA256=cb3052cc7eb48d30e5b97a0e4930969aff64cf771a138a515e1d4603b21c753c
+export DBM_URL=https://github.com/db-migrate/meta-db-migrate/releases/download/v$DBM_VERSION/meta-db-migrate-v$DBM_VERSION-linux-x86_64-glibc2.39.tar.gz
+export DBM=$OUT/meta-db-migrate-$DBM_VERSION
+if [ ! -f "$DBM/lib/libdbmigrate-core.a" ]; then
+  mkdir -p "$OUT/sources" "$DBM"
+  dbmTar=$OUT/sources/$(basename "$DBM_URL")
+  [ -f "$dbmTar" ] || curl -fsSL "$DBM_URL" -o "$dbmTar"
+  echo "$DBM_SHA256  $dbmTar" | sha256sum -c --quiet -
+  tar -xzf "$dbmTar" -C "$DBM" --strip-components=2 opt/meta-db-migrate
+fi
+
 export DEPS=${DEPS:-$OUT/deps}
 export META_ROOT
 [ -f "$DEPS/SOURCES" ] || ci/deps.sh "$DEPS"
 
 rm -rf "$WORK" && mkdir -p "$WORK/addon-h" "$STAGE"
 
-INCS="-I$DEPS/include"
+INCS="-I$DEPS/include -I$DBM/include"
 L=$DEPS/lib
 # the module's libraries, as archives: nothing for the dynamic linker to find
 STATIC_LIBS="$L/libpq.a $L/libpgcommon_shlib.a $L/libpgport_shlib.a $L/libcurl.a $L/libyaml.a $L/libssl.a $L/libcrypto.a $L/libz.a"
@@ -42,14 +55,23 @@ STATIC_LIBS="$L/libpq.a $L/libpgcommon_shlib.a $L/libpgport_shlib.a $L/libcurl.a
 (cd src && "$META_ROOT/meta" -s -I . $INCS -module "$WORK/addon" main.c)
 cp "$WORK"/addon-h/*.h "$WORK/addon/"
 
+# the migrations, under a path that ends in migrations/<name>.c: meta-db-migrate
+# names each one after its __FILE__, as node db-migrate does
+mkdir -p "$WORK/addon/migrations"
+MIGRATIONS=""
+for m in migrations/*.c; do
+  "$META_ROOT/meta" -s -I src $INCS -emit "$WORK/addon/migrations/$(basename "$m")" "$m"
+  MIGRATIONS="$MIGRATIONS \$ngx_addon_dir/migrations/$(basename "$m")"
+done
+
 # The config meta writes compiles the runtime from its sources; the image has
 # none, it has the runtime as an archive. Only the module itself is compiled
 # here, and the archive is linked.
 sed -i \
-  -e 's|^\( *ngx_module_srcs=\).*|\1"$ngx_addon_dir/ngx_http_meta_module.c"|' \
-  -e "s|^\\( *ngx_module_libs=\"\\).*|\\1$META_ROOT/lib/libmeta_runtime.a $STATIC_LIBS -lpthread -ldl -lm\"|" \
+  -e "s|^\\( *ngx_module_srcs=\\).*|\\1\"\\\$ngx_addon_dir/ngx_http_meta_module.c$MIGRATIONS\"|" \
+  -e "s|^\\( *ngx_module_libs=\"\\).*|\\1-Wl,--whole-archive $DBM/lib/libdbmigrate-cockroachdb.a $DBM/lib/libdbmigrate-core.a -Wl,--no-whole-archive $META_ROOT/lib/libmeta_runtime.a $STATIC_LIBS -lpthread -ldl -lm\"|" \
   "$WORK/addon/config"
-grep -q 'libmeta_runtime.a' "$WORK/addon/config" || { echo "addon config not as expected" >&2; exit 1; }
+grep -q 'libdbmigrate-core.a' "$WORK/addon/config" || { echo "addon config not as expected" >&2; exit 1; }
 
 # ---------------------------------------------------------------- nginx
 tarball=$OUT/nginx-$NGINX_VERSION.tar.gz
@@ -91,6 +113,8 @@ cp -r deploy doc README.md "$STAGE/"
   done < "$DEPS/SOURCES"
   section "yyjson $(sed -n 's/^#define YYJSON_VERSION_STRING "\(.*\)"/\1/p' "$META_ROOT/runtime/vendor/yyjson/yyjson.h") (MIT), vendored in the meta runtime"
   sed -n '2,20p' "$META_ROOT/runtime/vendor/yyjson/yyjson.h"
+  section "meta-db-migrate $DBM_VERSION (MIT), linked statically with the migrations"
+  cat "$DBM/share/doc/meta-db-migrate/LICENSE"
   section "glibc (LGPL-2.1-or-later)"
   echo "Not included: linked dynamically and provided by the host system."
 } > "$STAGE/THIRD_PARTY_NOTICES"
@@ -101,6 +125,8 @@ cp -r deploy doc README.md "$STAGE/"
   echo "nginx $NGINX_VERSION"
   echo "meta ${META_REF:-unknown}"
   while read -r name version url sum; do echo "$name $version"; done < "$DEPS/SOURCES"
+  echo "meta-db-migrate $DBM_VERSION"
+  echo "migrations $(ls migrations | tr '\n' ' ')"
   echo "built on $(. /etc/os-release && echo "$PRETTY_NAME")"
 } > "$STAGE/BUILD"
 
