@@ -1,6 +1,6 @@
-# wx-keyagent: Betrieb
+# wx1-keyagent: Betrieb
 
-Der wx-keyagent läuft bei Ihnen, nicht beim Provider. Er hält die Schlüssel Ihrer
+Der wx1-keyagent läuft bei Ihnen, nicht beim Provider. Er hält die Schlüssel Ihrer
 vertraulichen VMs (Confidential VMs, AMD SEV-SNP) und gibt sie nur an eine VM heraus, die
 nachweist, dass sie genau die ist, die Sie freigegeben haben. Der Provider stellt Anfragen
 ("neue VM", "VM auf weiterem Host", ...) und erfährt nur, ob sie umgesetzt oder abgelehnt
@@ -10,7 +10,7 @@ wurden. Einen Schlüssel sieht er nie.
 
 | Teil | Wozu |
 |---|---|
-| wx-keyagent | dieses Programm: Anfragen prüfen, Freigaben, Schlüsselfreigabe, UI |
+| wx1-keyagent | dieses Programm: Anfragen prüfen, Freigaben, Schlüsselfreigabe, UI |
 | OpenBao | hält die Schlüssel und alles, wovon eine Freigabe abhängt |
 | Trustee-KBS | gibt den vTPM-State-Schlüssel an den SVSM Ihrer VMs (liest aus OpenBao) |
 | PostgreSQL oder CockroachDB | Anfragen, Leases, Protokoll - nichts, wovon eine Freigabe abhängt |
@@ -25,12 +25,12 @@ keine Schlüssel. Geht OpenBao verloren, sind die Disks Ihrer VMs nicht mehr les
 
 ```
 bao secrets enable -path=kv -version=1 kv          # Schlüssel, liest auch der KBS
-bao secrets enable -path=wx -version=2 kv          # Zustand des wx-keyagent
-bao policy write wx-keyagent deploy/openbao-policy.hcl
-bao token create -policy=wx-keyagent -period=768h -field=token > /secrets/openbao-token
+bao secrets enable -path=wx -version=2 kv          # Zustand des wx1-keyagent
+bao policy write wx1-keyagent deploy/openbao-policy.hcl
+bao token create -policy=wx1-keyagent -period=768h -field=token > /secrets/openbao-token
 ```
 
-Die Policy erlaubt dem wx-keyagent nur, was er braucht. Die vTPM-State-Schlüssel kann er
+Die Policy erlaubt dem wx1-keyagent nur, was er braucht. Die vTPM-State-Schlüssel kann er
 schreiben, aber nicht lesen; die gibt nur der KBS heraus, und nur an den SVSM genau der VM,
 zu der sie gehören.
 
@@ -81,7 +81,7 @@ eine frische Nonce gebunden. TLS dort hieße, dass das VM-Image Ihre CA kennen m
 API und Schlüsselfreigabe laufen auf verschiedenen Ports, und jede Route prüft, auf welchem
 eine Anfrage ankam: Ihre VMs erreichen nur die Freigabe, nichts sonst.
 
-Die Tabellen in der Datenbank legt der wx-keyagent beim Start an.
+Die Tabellen in der Datenbank legt der wx1-keyagent beim Start an.
 
 ## Bedienen
 
@@ -159,6 +159,6 @@ seinem Client-Zertifikat, wenn `WX_CP_CLIENT_CA` gesetzt ist).
 - `vol-<uuid>`: ein Volume. Es hängt an höchstens einer VM; als Boot-Disk angehängt ist es
   deren Hauptdisk.
 
-Der wx-keyagent entsperrt die **Hauptdisk** einer VM beim Booten. Weitere Volumes können
+Der wx1-keyagent entsperrt die **Hauptdisk** einer VM beim Booten. Weitere Volumes können
 Sie in der VM selbst über dieselbe Attestierung entsperren: siehe
 [daten-volumes.md](daten-volumes.md).

@@ -80,7 +80,7 @@ static int dbPrepare(void) {
   PGconn *db = meta_pgOpen(dbUrl());
 
   if (db == NULL) {
-    fprintf(stderr, "wx-keyagent: cannot reach the database\n");
+    fprintf(stderr, "wx1-keyagent: cannot reach the database\n");
     return 1;
   }
 
@@ -89,7 +89,7 @@ static int dbPrepare(void) {
     PGresult *r = db.query(dbSchema[i]);
 
     if (r == NULL || PQresultStatus(r) != PGRES_COMMAND_OK) {
-      fprintf(stderr, "wx-keyagent: schema: %s\n", db.lastError());
+      fprintf(stderr, "wx1-keyagent: schema: %s\n", db.lastError());
       db.close();
       return 1;
     }
@@ -119,7 +119,7 @@ static int dbConnect(void) {
   database = meta_pgOpen(dbUrl());
 
   if (database == NULL) {
-    fprintf(stderr, "wx-keyagent: this worker cannot reach the database\n");
+    fprintf(stderr, "wx1-keyagent: this worker cannot reach the database\n");
     return 1;
   }
 

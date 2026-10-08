@@ -1,5 +1,5 @@
 /**
- * wx-keyagent: the customer's side of confidential VMs.
+ * wx1-keyagent: the customer's side of confidential VMs.
  *
  * Runs at the customer, never at the provider. Holds nothing itself: the
  * keys and everything a key release depends on live in the customer's
@@ -20,9 +20,9 @@
 static int startWorker(void) {
 
   if (!baoConfigure())
-    fprintf(stderr, "wx-keyagent: no OpenBao token\n");
+    fprintf(stderr, "wx1-keyagent: no OpenBao token\n");
   else if (!baoEnsureStateMount())
-    fprintf(stderr, "wx-keyagent: the state mount wx/ in OpenBao is missing or not ours: "
+    fprintf(stderr, "wx1-keyagent: the state mount wx/ in OpenBao is missing or not ours: "
                     "bao secrets enable -path=wx -version=2 kv, and a token with "
                     "deploy/openbao-policy.hcl\n");
 
@@ -56,7 +56,7 @@ static http_response_t health(http_request_t *req) {
   int baoStatus = bao.status;
   bao.release();
 
-  sha256Hex("wx-keyagent", 11, hash);
+  sha256Hex("wx1-keyagent", strlen("wx1-keyagent"), hash);
 
   obj answer = {
     database: db,

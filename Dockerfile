@@ -1,5 +1,5 @@
-# wx-keyagent: meta -> nginx-Modul, ausgeliefert mit dem passenden nginx.
-#   docker build --build-context meta=../../metalanguage -t wx/keyagent-meta .
+# wx1-keyagent: meta -> nginx-Modul, ausgeliefert mit dem passenden nginx.
+#   docker build --build-context meta=../../metalanguage -t wx/wx1-keyagent .
 ARG NGINX_VERSION=1.26.3
 
 FROM debian:trixie AS build
@@ -37,9 +37,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=build /opt/nginx /opt/nginx
 COPY --from=build /meta/meta-http /usr/local/bin/meta-http
-ENV META_HTTP_NGINX=/opt/nginx/sbin/nginx META_HTTP_PREFIX=/var/lib/wx-keyagent/nginx
+ENV META_HTTP_NGINX=/opt/nginx/sbin/nginx META_HTTP_PREFIX=/var/lib/wx1-keyagent/nginx
 # nicht als root: nginx braucht keine Rechte, und Master und Worker laufen als ein Benutzer
-RUN useradd --system --home /var/lib/wx-keyagent wxka && mkdir -p /var/lib/wx-keyagent/nginx \
-    && chown -R wxka /var/lib/wx-keyagent
-USER wxka
+RUN useradd --system --home /var/lib/wx1-keyagent wx1ka && mkdir -p /var/lib/wx1-keyagent/nginx \
+    && chown -R wx1ka /var/lib/wx1-keyagent
+USER wx1ka
 CMD ["meta-http", "/opt/nginx/modules/ngx_http_meta_module.so"]

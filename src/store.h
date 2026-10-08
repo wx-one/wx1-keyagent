@@ -400,7 +400,7 @@ static void storeLog(const char *disk, const char *step, bool ok, const char *de
   q.release();
 
   if (!done)
-    fprintf(stderr, "wx-keyagent: cannot log %s for %s\n", step, disk ?: "-");
+    fprintf(stderr, "wx1-keyagent: cannot log %s for %s\n", step, disk ?: "-");
 }
 
 #endif /* WX_STORE_H */

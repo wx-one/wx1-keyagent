@@ -1,8 +1,8 @@
-# What wx-keyagent may do in the customer's OpenBao, and nothing more.
+# What wx1-keyagent may do in the customer's OpenBao, and nothing more.
 #
 #   bao secrets enable -path=wx -version=2 kv        (once, by the operator)
-#   bao policy write wx-keyagent deploy/openbao-policy.hcl
-#   bao token create -policy=wx-keyagent -period=768h -field=token > /secrets/openbao-token
+#   bao policy write wx1-keyagent deploy/openbao-policy.hcl
+#   bao token create -policy=wx1-keyagent -period=768h -field=token > /secrets/openbao-token
 #
 # kv/ is the KBS's (KV v1); the KBS reads it with a token of its own.
 

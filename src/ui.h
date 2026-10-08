@@ -21,7 +21,7 @@ static void uiConfigure(void) {
 
   if (!readSecret(env("WX_UI_PASSWORD_FILE", "/secrets/ui-password"), uiPassword,
                   sizeof uiPassword)) {
-    fprintf(stderr, "wx-keyagent: no UI password, the UI is closed\n");
+    fprintf(stderr, "wx1-keyagent: no UI password, the UI is closed\n");
     return;
   }
 
@@ -50,7 +50,7 @@ static bool uiAuthorized(http_request_t *req) {
 
 static http_response_t uiLogin(http_request_t *req) {
   return req.reply(401)
-      .header("www-authenticate", "Basic realm=\"wx-keyagent\"")
+      .header("www-authenticate", "Basic realm=\"wx1-keyagent\"")
       .text("Anmeldung noetig");
 }
 
@@ -189,9 +189,9 @@ static void pageStart(buf_t *out, const char *title, const char *active) {
   buf_t__put(out, "<!doctype html><html lang=de><head><meta charset=utf-8>"
                   "<meta name=viewport content='width=device-width,initial-scale=1'><title>");
   buf_t__html(out, title);
-  buf_t__put(out, " – wx-keyagent</title><style>");
+  buf_t__put(out, " – wx1-keyagent</title><style>");
   buf_t__put(out, uiCss);
-  buf_t__put(out, "</style></head><body><header><b>wx-keyagent</b><nav>");
+  buf_t__put(out, "</style></head><body><header><b>wx1-keyagent</b><nav>");
 
   for (int i = 0; i < 3; ++i)
     buf_t__printf(out, "<a href='%s' class='%s'>%s</a>", links[i][0],

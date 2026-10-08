@@ -39,11 +39,11 @@ static void apiConfigure(void) {
   cpClientSubject = getenv("WX_CP_CLIENT_SUBJECT");
 
   if (!readSecret(env("WX_CP_TOKEN_FILE", "/secrets/cp-token"), cpToken, sizeof cpToken))
-    fprintf(stderr, "wx-keyagent: no control plane token, its API is closed\n");
+    fprintf(stderr, "wx1-keyagent: no control plane token, its API is closed\n");
 
   if (!readSecret(env("WX_CUSTOMER_TOKEN_FILE", "/secrets/customer-token"), customerToken,
                   sizeof customerToken))
-    fprintf(stderr, "wx-keyagent: no customer token, the customer API is closed\n");
+    fprintf(stderr, "wx1-keyagent: no customer token, the customer API is closed\n");
 }
 
 static bool bearer(http_request_t *req, const char *token);
@@ -415,7 +415,7 @@ static void apiRoutes(void) {
                           tls && strcmp(env("WX_RELEASE_TLS", "0"), "1") == 0);
 
   if (apiPort <= 0 || releasePort <= 0 || apiPort == releasePort) {
-    fprintf(stderr, "wx-keyagent: WX_API_LISTEN and WX_RELEASE_LISTEN need one port each, "
+    fprintf(stderr, "wx1-keyagent: WX_API_LISTEN and WX_RELEASE_LISTEN need one port each, "
                     "and not the same\n");
     exit(1);
   }

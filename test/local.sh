@@ -3,13 +3,13 @@
 # then test/api.sh against it. Leaves nothing behind.
 #
 #   test/local.sh            builds the image first (build.sh)
-#   NO_BUILD=1 test/local.sh uses wx/keyagent-meta as it is
+#   NO_BUILD=1 test/local.sh uses wx/wx1-keyagent as it is
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-NET=wxka-test
+NET=wx1ka-test
 W=$(mktemp -d)
-trap 'docker rm -f wxka-test-agent wxka-test-db wxka-test-bao wxka-test-kbs >/dev/null 2>&1; docker network rm $NET >/dev/null 2>&1; rm -rf "$W"' EXIT
+trap 'docker rm -f wx1ka-test-agent wx1ka-test-db wx1ka-test-bao wx1ka-test-kbs >/dev/null 2>&1; docker network rm $NET >/dev/null 2>&1; rm -rf "$W"' EXIT
 
 [ -n "${NO_BUILD:-}" ] || ./build.sh >/dev/null
 
@@ -42,35 +42,35 @@ mkdir -p "$W/tls"
 chmod -R a+rX "$W"; chmod 777 "$W/kbs" "$W/kds"
 
 docker network create $NET >/dev/null
-docker run -d --name wxka-test-db --network $NET cockroachdb/cockroach:latest-v24.3 \
+docker run -d --name wx1ka-test-db --network $NET cockroachdb/cockroach:latest-v24.3 \
   start-single-node --insecure >/dev/null
-docker run -d --name wxka-test-bao --network $NET -e BAO_DEV_ROOT_TOKEN_ID=root \
+docker run -d --name wx1ka-test-bao --network $NET -e BAO_DEV_ROOT_TOKEN_ID=root \
   -e BAO_DEV_LISTEN_ADDRESS=0.0.0.0:8200 openbao/openbao:latest server -dev >/dev/null
-docker run -d --name wxka-test-kbs --network $NET -v "$W/kbs":/out python:3-alpine python /out/kbs-stub.py >/dev/null
+docker run -d --name wx1ka-test-kbs --network $NET -v "$W/kbs":/out python:3-alpine python /out/kbs-stub.py >/dev/null
 
 for i in $(seq 60); do
-  docker exec wxka-test-db cockroach sql --insecure -e "create database if not exists keyagent" >/dev/null 2>&1 && break
+  docker exec wx1ka-test-db cockroach sql --insecure -e "create database if not exists keyagent" >/dev/null 2>&1 && break
   sleep 1
 done
 # as an operator would set it up: the KBS's kv/, the agent's wx/, and a token
 # with the agent's policy only - the tests run without root
-B="docker exec -i -e BAO_ADDR=http://127.0.0.1:8200 -e BAO_TOKEN=root wxka-test-bao bao"
+B="docker exec -i -e BAO_ADDR=http://127.0.0.1:8200 -e BAO_TOKEN=root wx1ka-test-bao bao"
 $B secrets enable -version=1 -path=kv kv >/dev/null
 $B secrets enable -version=2 -path=wx kv >/dev/null
-$B policy write wx-keyagent - < deploy/openbao-policy.hcl >/dev/null
-$B token create -policy=wx-keyagent -field=token > "$W/secrets/openbao-token"
+$B policy write wx1-keyagent - < deploy/openbao-policy.hcl >/dev/null
+$B token create -policy=wx1-keyagent -field=token > "$W/secrets/openbao-token"
 
-docker run -d --name wxka-test-agent --network $NET -p 127.0.0.1::8095 \
+docker run -d --name wx1ka-test-agent --network $NET -p 127.0.0.1::8095 \
   -v "$W/secrets":/secrets:ro -v "$W/refs":/refs:ro -v "$W/kds":/kds -v "$W/tls":/tls:ro \
   -e WX_TLS_CERT=/tls/agent.pem -e WX_TLS_KEY=/tls/agent.key \
   -e WX_CP_CLIENT_CA=/tls/ca.pem -e WX_CP_CLIENT_SUBJECT=/CN=control-plane \
-  -e WX_DB='postgresql://root@wxka-test-db:26257/keyagent?sslmode=disable' \
-  -e WX_OPENBAO_URL=http://wxka-test-bao:8200 -e WX_KBS_ADMIN_URL=http://wxka-test-kbs:8090 \
+  -e WX_DB='postgresql://root@wx1ka-test-db:26257/keyagent?sslmode=disable' \
+  -e WX_OPENBAO_URL=http://wx1ka-test-bao:8200 -e WX_KBS_ADMIN_URL=http://wx1ka-test-kbs:8090 \
   -e WX_API_LISTEN=0.0.0.0:8095 -e WX_RELEASE_LISTEN=0.0.0.0:8091 -e WX_WORKERS=2 \
-  wx/keyagent-meta >/dev/null
+  wx/wx1-keyagent >/dev/null
 
-PORT=$(docker port wxka-test-agent 8095 | head -1 | cut -d: -f2)
+PORT=$(docker port wx1ka-test-agent 8095 | head -1 | cut -d: -f2)
 for i in $(seq 30); do curl -sf --cacert "$W/tls/ca.pem" "https://localhost:$PORT/health" >/dev/null && break; sleep 1; done
 
-WX_API="https://localhost:$PORT" WX_TLS="$W/tls" WX_BAO=wxka-test-bao WX_DB_CONTAINER=wxka-test-db \
+WX_API="https://localhost:$PORT" WX_TLS="$W/tls" WX_BAO=wx1ka-test-bao WX_DB_CONTAINER=wx1ka-test-db \
   WX_POLICY="$W/kbs/policy.rego" test/api.sh

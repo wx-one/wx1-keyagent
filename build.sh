@@ -8,4 +8,4 @@ META=${META:-../../metalanguage}
 rm -rf build/meta-src && mkdir -p build/meta-src
 git -C "$META" archive HEAD | tar -x -C build/meta-src
 git -C "$META" rev-parse HEAD > build/meta-src/META_COMMIT
-docker build --build-context meta=build/meta-src -t wx/keyagent-meta .
+docker build --build-context meta=build/meta-src -t wx/wx1-keyagent .
