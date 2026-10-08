@@ -8,6 +8,15 @@
  *
  * Taking rights away (detach) applies at once; giving them needs an approval
  * or a rule.
+ *
+ * Two kinds of disk, as the platform has them:
+ *   system  the one disk bound to a VM. It has no ID of its own: it is
+ *           named by the VM's UUID, created with the VM (create) and never
+ *           attached to another one. When the VM goes (detach), its binding
+ *           goes at once and the customer is asked whether to shred the key.
+ *   volume  a disk of its own (create_volume), attached to at most one VM at
+ *           a time (attach, detach), bound to that VM's HOST_DATA.
+ * Entries without a kind are from before this split and keep the old rules.
  */
 #ifndef WX_REQUESTS_H
 #define WX_REQUESTS_H
@@ -199,7 +208,8 @@ static bool fileMatches(json_t p, const char *name, const char *want) {
 /**
  * initdata and the files it names. `state` is "new" or "existing": a disk
  * once attached is encrypted and never "new" again, or an empty disk slipped
- * in under the old name would be formatted with the customer's key.
+ * in under the old name would be formatted with the customer's key. NULL
+ * for a volume, which the initdata does not name.
  */
 static void checkInitdata(checks_t *checks, json_t p, const char *disk, const char *state,
                           char hostData[65]) {
@@ -225,12 +235,15 @@ static void checkInitdata(checks_t *checks, json_t p, const char *disk, const ch
   checks.ok(isUuid(vm), "VM UUID valid");
   checks.ok(strcmp(doc.get("vm.uuid") ?: "", vm ?: "-") == 0, "initdata names this VM UUID");
 
-  char root[128];
-  text_t want = TEXT`${disk}:${state}`;
-  want.into(root, sizeof root);
-  text_t says = TEXT`initdata names the disk as '${state}'`;
-  says.into(text, sizeof text);
-  checks.ok(strcmp(doc.get("wx.disk.root") ?: "", root) == 0, text);
+  /* a volume is attached to a running VM: its initdata cannot name it */
+  if (state != NULL) {
+    char root[128];
+    text_t want = TEXT`${disk}:${state}`;
+    want.into(root, sizeof root);
+    text_t says = TEXT`initdata names the disk as '${state}'`;
+    says.into(text, sizeof text);
+    checks.ok(strcmp(doc.get("wx.disk.root") ?: "", root) == 0, text);
+  }
 
   checks.ok(strcmp(doc.get("wx.release.url") ?: "", releaseGuestUrl()) == 0,
             "initdata names our key release");
@@ -290,13 +303,33 @@ static bool checkCloudInit(checks_t *checks, json_t p, settings_t *settings) {
 }
 
 /**
+ * Which disk a request means: a system disk is named by its VM, so create
+ * takes the VM's UUID; everything else the disk_id if there is one, else
+ * the VM's (the system disk again).
+ */
+static const char *diskOf(const char *type, json_t p) {
+
+  const char *disk = p.get("disk_id").text();
+
+  if (strcmp(type, "create") == 0 || disk[0] == 0)
+    return p.get("vm_uuid").text();
+
+  return disk;
+}
+
+/** "system", "volume", or "" for a disk from before the split. */
+static const char *kindOf(bao_entry_t *disk) {
+  return disk->found ? disk->payload().get("kind").text() : "";
+}
+
+/**
  * Checks a request against the current state. Answers whether an auto rule
  * lets it through; failed checks reject it whatever the rule says.
  */
 static bool validate(checks_t *checks, const char *type, json_t p) {
 
   settings_t settings = settingsRead();
-  const char *diskId = p.get("disk_id").text() ?: "";
+  const char *diskId = diskOf(type, p);
   bao_entry_t disk = storeGet("disks", diskId);
   bao_entry_t att = storeGet("attachments", diskId);
   bool active = disk.found && strcmp(disk.payload().get("status").text() ?: "", "active") == 0;
@@ -318,19 +351,43 @@ static bool validate(checks_t *checks, const char *type, json_t p) {
     inPool = false;
   }
 
+  const char *kind = kindOf(&disk);
+
   if (strcmp(type, "create") == 0) {
-    checks.ok(isUuid(diskId), "disk ID valid");
-    checks.ok(!disk.found, "disk ID not taken yet");
+    const char *named = p.get("disk_id").text();
+    checks.ok(named[0] == 0 || strcmp(named, diskId) == 0,
+              "no disk ID of its own (a system disk is named by its VM)");
+    checks.ok(isUuid(diskId), "VM UUID valid");
+    checks.ok(!disk.found, "the VM has no system disk yet");
     checkCloudInit(checks, p, &settings);
     checkInitdata(checks, p, diskId, "new", hostData);
     /* a new disk holds no data yet, nothing to take: always automatic. The
        remarks stay on the request, to look at before data goes onto it */
     automatic = true;
+  } else if (strcmp(type, "create_volume") == 0) {
+    checks.ok(isUuid(diskId), "volume ID valid");
+    checks.ok(!disk.found, "volume ID not taken yet");
+    /* no VM, no data: nothing to take */
+    automatic = true;
   } else if (strcmp(type, "attach") == 0) {
     checks.ok(active, "disk exists");
+    checks.ok(strcmp(kind, "system") != 0, "not a system disk (that belongs to its VM)");
     checks.ok(!att.found, "disk attached to no other VM");
     bool safe = checkCloudInit(checks, p, &settings);
-    checkInitdata(checks, p, diskId, "existing", hostData);
+    checkInitdata(checks, p, diskId, strcmp(kind, "volume") == 0 ? NULL : "existing", hostData);
+
+    /* a volume joins the VM as it is: the binding of the VM's system disk
+       knows its HOST_DATA, and the provider cannot name another one */
+    if (strcmp(kind, "volume") == 0) {
+      bao_entry_t vm = storeGet("attachments", p.get("vm_uuid").text());
+      if (vm.found)
+        checks.ok(strcmp(vm.payload().get("host_data").text(), hostData) == 0,
+                  "initdata is the VM's own (as bound to its system disk)");
+      else
+        checks.note("the VM has no system disk here; bound to the initdata as sent");
+      vm.release();
+    }
+
     automatic = settings.flag("auto_attach") && safe && inPool;
   } else if (strcmp(type, "add_host") == 0) {
     checks.ok(att.found, "disk is attached to a VM");
@@ -411,7 +468,7 @@ static bool newVtpmKey(const char *hostData) {
  * attachments/<disk> and, if the VM has none yet, vtpm/<host_data> with its
  * state key. The vTPM entry stays when the same VM attaches the disk again.
  */
-static const char *attach(json_t p, const char *diskId) {
+static const char *attach(json_t p, const char *diskId, bool withVtpm) {
 
   char key[200];
   bool taken = false;
@@ -452,7 +509,8 @@ static const char *attach(json_t p, const char *diskId) {
   free(raw.at);
   free(userData.at);
 
-  if (wrong != NULL)
+  /* a volume joins a VM that has its vTPM already */
+  if (wrong != NULL || !withVtpm)
     return wrong;
 
   doc = yyjson_mut_doc_new(NULL);
@@ -559,23 +617,47 @@ static const char *deleteDisk(const char *diskId) {
   return wrong;
 }
 
+/** Files a delete_disk request for the customer to decide. */
+static void askToShred(const char *diskId, const char *vm, const char *vmName) {
+
+  yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
+  yyjson_mut_val *p = yyjson_mut_obj(doc);
+  yyjson_mut_doc_set_root(doc, p);
+  yyjson_mut_obj_add_strcpy(doc, p, "disk_id", diskId);
+  yyjson_mut_obj_add_strcpy(doc, p, "vm_uuid", vm);
+  yyjson_mut_obj_add_strcpy(doc, p, "vm_name", vmName);
+  char *payload = yyjson_mut_write(doc, 0, NULL);
+  yyjson_mut_doc_free(doc);
+
+  static const char note[] =
+      "[[null, \"the VM was deleted; approving shreds the key of its system disk for good\"]]";
+
+  sql_t q = SQL`insert into requests (type, payload, status, checks)
+    values ('delete_disk', ${payload ?: "{}"}::JSONB, 'pending', ${note}::JSONB)`;
+  dbDo(&q);
+  q.release();
+  free(payload);
+}
+
 /** Carries out an approved request: keys, bindings, policy. NULL or why not. */
 static const char *apply(const char *type, json_t p) {
 
-  const char *diskId = p.get("disk_id").text() ?: "";
+  const char *diskId = diskOf(type, p);
   const char *wrong = NULL;
   char key[200];
 
   if (strcmp(type, "unlock") == 0)
     return NULL;
 
-  if (strcmp(type, "create") == 0) {
+  if (strcmp(type, "create") == 0 || strcmp(type, "create_volume") == 0) {
 
+    bool system = strcmp(type, "create") == 0;
     bool taken = false;
     yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
     yyjson_mut_val *d = yyjson_mut_obj(doc);
     yyjson_mut_doc_set_root(doc, d);
     yyjson_mut_obj_add_str(doc, d, "status", "creating");
+    yyjson_mut_obj_add_str(doc, d, "kind", system ? "system" : "volume");
     yyjson_mut_obj_add_int(doc, d, "created", (int64_t)time(NULL));
 
     text_t at = TEXT`disks/${diskId}`;
@@ -591,7 +673,7 @@ static const char *apply(const char *type, json_t p) {
     if (!newDiskKey(diskId))
       return "cannot write the disk key (OpenBao)";
 
-    if ((wrong = attach(p, diskId)) != NULL)
+    if (system && (wrong = attach(p, diskId, true)) != NULL)
       return wrong;
 
     json_t active = meta_toJSON("{\"status\":\"active\"}");
@@ -603,7 +685,11 @@ static const char *apply(const char *type, json_t p) {
 
   } else if (strcmp(type, "attach") == 0) {
 
-    if ((wrong = attach(p, diskId)) != NULL)
+    bao_entry_t was = storeGet("disks", diskId);
+    bool volume = strcmp(kindOf(&was), "volume") == 0;
+    was.release();
+
+    if ((wrong = attach(p, diskId, !volume)) != NULL)
       return wrong;
 
     /* a delete racing this one: whoever comes second sees the other */
@@ -629,6 +715,16 @@ static const char *apply(const char *type, json_t p) {
       return "cannot remove the binding (OpenBao)";
 
     storeResetLease(diskId);
+
+    /* the VM is gone, and with it its system disk on the host. The key stays
+       until the customer says so: a provider that deletes VMs must not be
+       able to make the customer's backups of them unreadable */
+    bao_entry_t was = storeGet("disks", diskId);
+    bool system = strcmp(kindOf(&was), "system") == 0;
+    was.release();
+
+    if (system)
+      askToShred(diskId, p.get("vm_uuid").text(), p.get("vm_name").text());
 
   } else if (strcmp(type, "delete_disk") == 0) {
 

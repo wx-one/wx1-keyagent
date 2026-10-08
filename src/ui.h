@@ -278,10 +278,11 @@ static void chipLabel(buf_t *out, settings_t *settings, const char *chip, const 
 static const char *typeLabel(const char *type) {
 
   static const char *const labels[][2] = {
-      {"create", "Neue Disk fuer neue VM"},
-      {"attach", "Bestehende Disk an neue VM haengen"},
+      {"create", "Neue VM mit Systemdisk"},
+      {"create_volume", "Neues Volume (noch an keiner VM)"},
+      {"attach", "Volume an VM haengen"},
       {"add_host", "VM auf weiterem Host erlauben (Umzug)"},
-      {"detach", "VM geloescht, Disk bleibt"},
+      {"detach", "Disk von VM getrennt (VM geloescht oder Volume abgehaengt)"},
       {"delete_disk", "Disk endgueltig loeschen"},
       {"unlock", "Neue VM-Instanz will die Disk entsperren"}};
 
