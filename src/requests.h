@@ -455,6 +455,19 @@ done:
 
 /* ------------------------------------------------------------- applying */
 
+/**
+ * What a request that passed its checks says when another one, decided at
+ * the same moment, got there first. The check-and-set in OpenBao is what
+ * decides; losing that race is a refusal, not a failure of the agent.
+ */
+static const char lostTaken[] = "disk ID is taken";
+static const char lostAttached[] = "disk is already attached to a VM";
+static const char lostDeleting[] = "disk is being deleted";
+
+static bool lostRace(const char *wrong) {
+  return wrong == lostTaken || wrong == lostAttached || wrong == lostDeleting;
+}
+
 /** A new entry, written only if there is none yet; `*taken` if there was. */
 static bool baoCreate(const char *key, yyjson_mut_doc *doc, bool *taken) {
 
@@ -541,7 +554,7 @@ static const char *attach(json_t p, const char *diskId, bool withVtpm) {
   at.into(key, sizeof key);
 
   if (!baoCreate(key, doc, &taken))
-    wrong = taken ? "disk is already attached to a VM" : "cannot write the binding (OpenBao)";
+    wrong = taken ? lostAttached : "cannot write the binding (OpenBao)";
 
   yyjson_mut_doc_free(doc);
   free(raw.at);
@@ -737,7 +750,7 @@ static const char *apply(const char *type, json_t p) {
     yyjson_mut_doc_free(doc);
 
     if (!made)
-      return taken ? "disk ID is taken" : "cannot write the disk (OpenBao)";
+      return taken ? lostTaken : "cannot write the disk (OpenBao)";
 
     /* the key is made here, at the customer's, and goes only into their OpenBao */
     if (!newDiskKey(diskId))
@@ -774,7 +787,7 @@ static const char *apply(const char *type, json_t p) {
 
     if (!active) {
       storeDrop("attachments", diskId);
-      return "disk is being deleted";
+      return lostDeleting;
     }
 
   } else if (strcmp(type, "add_host") == 0) {
@@ -836,8 +849,9 @@ static void finish(long id, const char *type, json_t p, bool approve, const char
       why.into(reason, sizeof reason);
     } else {
       const char *wrong = apply(type, p);
-      status = wrong == NULL ? "applied" : "error";
-      text_t why = TEXT`${wrong ?: ""}`;
+      status = wrong == NULL ? "applied" : lostRace(wrong) ? "rejected" : "error";
+      text_t why = lostRace(wrong) ? TEXT`decided at the same time as another request: ${wrong}`
+                                   : TEXT`${wrong ?: ""}`;
       why.into(reason, sizeof reason);
     }
 
