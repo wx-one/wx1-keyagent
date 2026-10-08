@@ -1,15 +1,59 @@
-# The released binary in a plain ubuntu:24.04 - nothing of meta, no compiler:
-# what a customer runs, as an image. Built from out/<release>.tar.gz.
+# wx1-keyagent on the hardened Debian 13 runtime seed of container.gov.de
+# (Secure Government Container Initiative): scratch with a trust store and
+# a nonroot user, no shell, no package manager. On top only the release and
+# the libraries `ldd` proves it needs - glibc, taken from the Debian release
+# the seed's own builder pins.
+#
 #   docker build -f ci/Dockerfile.release --build-arg RELEASE=<name> -t wx/wx1-keyagent:<v> out
-FROM ubuntu:24.04
+ARG SEED=registry.opencode.de/oci-community/images/auswaertiges-amt/debian:13.7@sha256:e6a784c10fcb9e6748815e6838b8c71a2f099846131232ddf17581fa518aacc9
+
+# the Debian snapshot the seed's builder uses, so glibc matches the seed's release
+FROM debian:trixie-20260918@sha256:9cc080028c43b27d2074d63a5f9caf7166d731494965616c1a6d2827a004585c AS assemble
 ARG RELEASE
-RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-      libpq5 libcurl4t64 libssl3t64 libyaml-0-2 libpcre2-8-0 zlib1g ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
-ADD ${RELEASE}.tar.gz /opt/
-RUN mv /opt/${RELEASE} /opt/wx1-keyagent \
-    && useradd --system --uid 999 --home /var/lib/wx1-keyagent wx1ka \
-    && mkdir -p /var/lib/wx1-keyagent && chown wx1ka /var/lib/wx1-keyagent
-USER wx1ka
-ENV WX_STATE_DIR=/var/lib/wx1-keyagent
-ENTRYPOINT ["/opt/wx1-keyagent/bin/wx1-keyagent"]
+ADD ${RELEASE}.tar.gz /stage/
+
+RUN set -eu; \
+    app=/rootfs/opt/wx1-keyagent; \
+    mkdir -p /rootfs/opt "$app"; \
+    cp -a /stage/${RELEASE}/. "$app/"; \
+    # every library ldd proves, from this Debian release - and libgcc_s, which
+    # glibc loads itself when a thread ends with pthread_exit
+    for f in "$app/sbin/nginx" "$app/modules/ngx_http_meta_module.so"; do \
+      ldd "$f" | awk '/=>/ {print $3} /^\t\// {print $1}'; \
+    done | sort -u > /libs; \
+    echo /lib/x86_64-linux-gnu/libgcc_s.so.1 >> /libs; \
+    for l in $(cat /libs); do \
+      mkdir -p "/rootfs$(dirname "$l")"; cp -L "$l" "/rootfs$l"; \
+    done; \
+    # and which Debian packages those came from, for the SBOM
+    for l in $(cat /libs); do dpkg -S "$(readlink -f "$l")" 2>/dev/null || dpkg -S "$l"; done \
+      | cut -d: -f1 | sort -u | xargs dpkg-query -W -f '${Package} ${Version} ${source:Package} ${source:Version}\n' \
+      > "$app/BASE-LIBS"; \
+    # nginx's working directory: the module writes the real configuration into
+    # the file nginx was started with, so it has to be writable
+    state=/rootfs/var/lib/wx1-keyagent; \
+    mkdir -p "$state/conf" "$state/logs" "$state/kds"; \
+    printf '%s\n' \
+      '# Written into the image, replaced by the module a moment after start.' \
+      'load_module /opt/wx1-keyagent/modules/ngx_http_meta_module.so;' \
+      'daemon off;' 'error_log stderr info;' 'pid logs/meta.pid;' \
+      'events { worker_connections 64; }' 'http { }' > "$state/conf/nginx.conf"; \
+    chown -R 65534:65534 "$state"; \
+    find /rootfs -exec touch -h -d @0 {} +
+
+FROM ${SEED}
+COPY --from=assemble /rootfs/ /
+
+ENV META_HTTP_MODULE=/opt/wx1-keyagent/modules/ngx_http_meta_module.so \
+    SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt \
+    WX_KDS=/var/lib/wx1-keyagent/kds
+
+LABEL org.opencontainers.image.title="wx1-keyagent" \
+      org.opencontainers.image.description="The customer's key release for confidential VMs" \
+      org.opencontainers.image.source="https://github.com/wx-one/wx1-keyagent" \
+      org.opencontainers.image.base.name="registry.opencode.de/oci-community/images/auswaertiges-amt/debian:13.7"
+
+USER 65534:65534
+# AMD's certificates are fetched once and kept; worth keeping across restarts
+VOLUME ["/var/lib/wx1-keyagent/kds"]
+ENTRYPOINT ["/opt/wx1-keyagent/sbin/nginx", "-c", "/var/lib/wx1-keyagent/conf/nginx.conf", "-p", "/var/lib/wx1-keyagent"]

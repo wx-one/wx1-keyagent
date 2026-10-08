@@ -6,68 +6,114 @@ on:
     tags: ['v*']
   pull_request:
 
+env:
+  IMAGE: ghcr.io/wx-one/wx1-keyagent
+
 jobs:
   build:
-    # meta's builtinDefines.h comes from the compiler the image was built with:
-    # ubuntu:24.04, so the runner is ubuntu-24.04 and uses its system gcc
+    # meta lowers against the headers of the compiler its image was built
+    # with: ubuntu:24.04, so the runner is ubuntu-24.04 and uses its gcc
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/meta
+        id: meta
         with:
           image: ${{ vars.META_IMAGE || 'wxone/meta:latest' }}
-      - name: build dependencies
+      - name: build tools
         run: |
           sudo apt-get update -qq
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
-            build-essential curl ca-certificates pkg-config \
-            libpq-dev libcurl4-openssl-dev libssl-dev libyaml-dev libpcre2-dev zlib1g-dev
+            build-essential curl ca-certificates perl bzip2 xz-utils bison flex jq
+      - name: static libraries (cached by ci/deps.sh)
+        uses: actions/cache@v4
+        with:
+          path: out/deps
+          key: deps-${{ runner.os }}-${{ hashFiles('ci/deps.sh') }}
       - name: build
         run: |
           version=${GITHUB_REF_NAME#v}
           [[ "$GITHUB_REF" == refs/tags/v* ]] || version=0.0.0-${GITHUB_SHA::12}
-          echo "VERSION=$version" >>"$GITHUB_ENV"
+          export META_REF=$(docker image inspect --format '{{index .RepoDigests 0}}' "${{ vars.META_IMAGE || 'wxone/meta:latest' }}")
           ci/build.sh "$version"
       - uses: actions/upload-artifact@v4
         with:
           name: release
           path: |
             out/wx1-keyagent-*.tar.gz
-            out/wx1-keyagent-*.tar.gz.sha256
+            out/wx1-keyagent-*.cdx.json
+            out/wx1-keyagent-*.sha256
 
-  test:
-    # the released binary in a plain ubuntu:24.04, against CockroachDB, OpenBao
-    # and a KBS stub: the whole of test/api.sh
+  image:
+    # the release on the hardened Debian 13 seed of container.gov.de, tested
+    # with the whole of test/api.sh against CockroachDB, OpenBao and a KBS stub
     needs: build
     runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           name: release
           path: out
-      - name: image from the release
+      - name: build image
         run: |
           release=$(basename out/wx1-keyagent-*.tar.gz .tar.gz)
-          docker build -q -f ci/Dockerfile.release --build-arg RELEASE="$release" \
-            -t wx/wx1-keyagent:ci out
-      - name: test/api.sh
-        run: IMAGE=wx/wx1-keyagent:ci NO_BUILD=1 test/local.sh
+          echo "RELEASE=$release" >>"$GITHUB_ENV"
+          docker build -q -f ci/Dockerfile.release --build-arg RELEASE="$release" -t wx1-keyagent:ci out
+      - name: test/api.sh against the image
+        run: IMAGE=wx1-keyagent:ci NO_BUILD=1 test/local.sh
+      - name: image SBOM
+        run: |
+          sudo apt-get install -y -qq jq >/dev/null
+          seed=$(sed -n 's/^ARG SEED=//p' ci/Dockerfile.release)
+          docker create --name base-libs wx1-keyagent:ci >/dev/null
+          docker cp base-libs:/opt/wx1-keyagent/BASE-LIBS out/BASE-LIBS
+          docker rm base-libs >/dev/null
+          tag=${GITHUB_REF_NAME#v}
+          [[ "$GITHUB_REF" == refs/tags/v* ]] || tag=ci
+          ci/sbom.sh image "out/$RELEASE.cdx.json" out/BASE-LIBS "$seed" "$IMAGE:$tag" \
+            > "out/$RELEASE.image.cdx.json"
+      - name: push image
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          echo "${{ github.token }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          tag=${GITHUB_REF_NAME#v}
+          docker tag wx1-keyagent:ci "$IMAGE:$tag"
+          docker push -q "$IMAGE:$tag"
+          docker inspect --format '{{index .RepoDigests 0}}' "$IMAGE:$tag" > "out/$RELEASE.image-digest"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: image
+          path: |
+            out/*.image.cdx.json
+            out/*.image-digest
+          if-no-files-found: ignore
 
   release:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: test
+    needs: [build, image]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
     steps:
       - uses: actions/download-artifact@v4
         with:
-          name: release
           path: out
+          merge-multiple: true
       - name: publish
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          image=$(cat out/*.image-digest)
+          {
+            echo "## Binary"
+            echo "\`wx1-keyagent-*-linux-x86_64.tar.gz\`: nginx with the agent's module, everything but glibc (>= 2.38) linked statically. SHA-256 in the \`.sha256\` file, SBOM (CycloneDX 1.6) in \`.cdx.json\`, licences in \`THIRD_PARTY_NOTICES\` inside the tarball."
+            echo
+            echo "## Image"
+            echo "\`$image\` - on the hardened Debian 13 runtime seed of container.gov.de. What it adds to the seed: \`.image.cdx.json\`."
+          } > notes.md
           gh release create "$GITHUB_REF_NAME" out/wx1-keyagent-* \
-            --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --generate-notes
+            --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --notes-file notes.md
