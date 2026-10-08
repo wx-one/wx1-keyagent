@@ -9,8 +9,9 @@ cd "$(dirname "$0")/.."
 
 NET=wx1ka-test
 W=$(mktemp -d)
-trap 'docker rm -f wx1ka-test-agent wx1ka-test-db wx1ka-test-bao wx1ka-test-kbs >/dev/null 2>&1; docker network rm $NET >/dev/null 2>&1; rm -rf "$W"' EXIT
+trap '[ -n "${KEEP:-}" ] || docker rm -f wx1ka-test-agent wx1ka-test-db wx1ka-test-bao wx1ka-test-kbs >/dev/null 2>&1; docker network rm $NET >/dev/null 2>&1; rm -rf "$W"' EXIT
 
+IMAGE=${IMAGE:-wx/wx1-keyagent}
 [ -n "${NO_BUILD:-}" ] || ./build.sh >/dev/null
 
 mkdir -p "$W/secrets" "$W/refs" "$W/kbs" "$W/kds"
@@ -67,7 +68,7 @@ docker run -d --name wx1ka-test-agent --network $NET -p 127.0.0.1::8095 \
   -e WX_DB='postgresql://root@wx1ka-test-db:26257/keyagent?sslmode=disable' \
   -e WX_OPENBAO_URL=http://wx1ka-test-bao:8200 -e WX_KBS_ADMIN_URL=http://wx1ka-test-kbs:8090 \
   -e WX_API_LISTEN=0.0.0.0:8095 -e WX_RELEASE_LISTEN=0.0.0.0:8091 -e WX_WORKERS=2 \
-  wx/wx1-keyagent >/dev/null
+  "$IMAGE" >/dev/null
 
 PORT=$(docker port wx1ka-test-agent 8095 | head -1 | cut -d: -f2)
 for i in $(seq 30); do curl -sf --cacert "$W/tls/ca.pem" "https://localhost:$PORT/health" >/dev/null && break; sleep 1; done
