@@ -10,8 +10,7 @@
  */
 #include <meta_http.h>
 
-#include "bao.h"
-#include "db.h"
+#include "store.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -39,7 +38,8 @@ static http_response_t health(http_request_t *req) {
   }
 
   char where[256];
-  snprintf(where, sizeof where, "%s/v1/sys/health", env("WX_OPENBAO_URL", "http://127.0.0.1:8200"));
+  text_t at = TEXT`${baoUrl}/v1/sys/health`;
+  at.into(where, sizeof where);
 
   fetch_answer_t bao = meta_get(where);
   int baoStatus = bao.status;
@@ -87,6 +87,87 @@ static http_response_t selftest(http_request_t *req) {
   return req.reply(200).text(said);
 }
 
+/** Exercises the state: patch, replay stand, EK binding, leases. */
+static http_response_t storetest(http_request_t *req) {
+
+  static char said[1024];
+  char ek[80];
+
+  storeDrop("disks", "t");
+  storeDrop("replay", "hd");
+  storeDrop("vtpm", "hd");
+  storeResetLease("t");
+
+  json_t a = meta_toJSON("{\"status\":\"active\",\"mode\":\"auto\"}");
+  json_t b = meta_toJSON("{\"mode\":\"manual\",\"status\":null}");
+  bool set1 = storeSet("disks", "t", a);
+  bool set2 = storeSet("disks", "t", b);
+  a.release();
+  b.release();
+  bao_entry_t d = storeGet("disks", "t");
+  const char *mode = d.payload().get("mode").text();
+  bool statusGone = d.payload().get("status").isNothing();
+  text_t m = TEXT`${mode ?: "-"}`;
+  char modeText[32];
+  m.into(modeText, sizeof modeText);
+  d.release();
+
+  replay_t r0 = storeReplay("hd");
+  const char *fresh = r0.refuses("0x01500021", 0);
+  bool c1 = storeReplayConfirm("hd", "0x01500021", 0, 1);
+  bool c2 = storeReplayConfirm("hd", "0x01500021", 1, 2);
+  replay_t r1 = storeReplay("hd");
+  const char *older = r1.refuses("0x01500021", 0);
+  const char *same = r1.refuses("0x01500021", 1);
+  const char *lost = r1.refuses("0x01500021", 2);
+  const char *never = r1.refuses("0x01500021", 3);
+  const char *other = r1.refuses("0x01500022", 2);
+  bool back = storeReplayConfirm("hd", "0x01500021", 0, 1);
+
+  storePinEk("hd", "ek-one");
+  storePinEk("hd", "ek-two");
+  storeEk("hd", ek, sizeof ek);
+  bool pinned = strcmp(ek, "ek-one") == 0;
+  storeUnbindEk("hd");
+  storeEk("hd", ek, sizeof ek);
+  bool unbound = ek[0] == 0;
+
+  bool l1 = storeTakeLease("t", "rid-a", "chip", 180);
+  bool l2 = storeTakeLease("t", "rid-b", "chip", 180);
+  bool l3 = storeTakeLease("t", "rid-a", "chip", 180);
+  bool holds = storeHoldsLease("t", "rid-a");
+  bool reset = storeResetLease("t");
+  bool l4 = storeTakeLease("t", "rid-b", "chip", 180);
+  bool ended = storeEndLease("t", "rid-b");
+  bool gone = !storeHoldsLease("t", "rid-b");
+  storeLog("t", "storetest", true, "ok", NULL, "test");
+
+  text_t out = TEXT`set=${set1}/${set2} mode=${modeText} statusGone=${statusGone}
+replay fresh=${fresh ?: "ok"} confirm=${c1}/${c2} older=${older ?: "ok"} same=${same ?: "ok"} lost=${lost ?: "ok"} never=${never ?: "ok"} other=${other ?: "ok"} back=${back}
+ek pinned=${pinned} unbound=${unbound}
+lease a=${l1} b=${l2} a-again=${l3} holds=${holds} reset=${reset} b-after-reset=${l4} ended=${ended} gone=${gone}
+`;
+  out.into(said, sizeof said);
+
+  return req.reply(200).text(said);
+}
+
+static bool bumpOne(yyjson_mut_doc *doc, yyjson_mut_val *root, void *with) {
+
+  yyjson_mut_val *n = yyjson_mut_obj_get(root, "n");
+  int64_t was = n != NULL ? yyjson_mut_get_sint(n) : 0;
+
+  yyjson_mut_obj_remove_str(root, "n");
+  yyjson_mut_obj_put(root, yyjson_mut_str(doc, "n"), yyjson_mut_sint(doc, was + 1));
+
+  return true;
+}
+
+/** One increment by read, change, check-and-set; many at once must lose none. */
+static http_response_t bump(http_request_t *req) {
+  return req.reply(baoEdit("selftest/bump", bumpOne, NULL) ? 200 : 409).text("");
+}
+
 /** A slow statement, so that several at once show the connection is shared safely. */
 static http_response_t dbtest(http_request_t *req) {
 
@@ -115,6 +196,8 @@ int main(void) {
   http.get("/health", health);
   http.get("/selftest", selftest);
   http.get("/dbtest", dbtest);
+  http.get("/storetest", storetest);
+  http.get("/bump", bump);
 
   http.listen(atoi(env("WX_PORT", "8095")));
 }
