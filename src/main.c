@@ -11,7 +11,7 @@
  */
 #include <meta_http.h>
 
-#include "api.h"
+#include "ui.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -25,6 +25,7 @@ static int startWorker(void) {
     fprintf(stderr, "wx-keyagent: cannot enable the state mount wx/ in OpenBao\n");
 
   apiConfigure();
+  uiConfigure();
 
   return dbConnect();
 }
@@ -81,6 +82,7 @@ int main(void) {
   http.env("WX_SNP_PRODUCT");
   http.env("WX_LEASE_TTL");
   http.env("TZ");
+  http.env("WX_UI_PASSWORD_FILE");
 
   if (atoi(env("WX_WORKERS", "0")) > 0)
     http.workers(atoi(env("WX_WORKERS", "0")));
@@ -91,6 +93,7 @@ int main(void) {
   http.get("/health", health);
 
   apiRoutes();
+  uiRoutes();
 
 
 }
