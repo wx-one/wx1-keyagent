@@ -141,7 +141,7 @@ static bool policyDisks(buf_t *out) {
     json_t chips = a.get("chip_ids");
     const char *hd = a.get("host_data").text();
 
-    if (att.found && isUuid(id) && isHex(hd, 64)) {
+    if (att.found && isDiskId(id) && isHex(hd, 64)) {
 
       buf_t__printf(out, "%s\n \"%s\": {\"host_data\": \"%s\", \"chip_ids\": [", written++ ? "," : "",
                     id, hd);

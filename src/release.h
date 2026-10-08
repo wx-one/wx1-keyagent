@@ -345,7 +345,7 @@ typedef struct {
   const char *wrong;
   int code;
   char why[200];
-  char disk[40];
+  char disk[48];
   char ctx[640];
 } release_t;
 
@@ -373,8 +373,8 @@ static void challenge(release_t *out, json_t req) {
   unsigned char nonce[64];
   char nonceHex[129], nonceB64[96], session[33];
 
-  if (!isUuid(diskId))
-    return out.refuse(400, "disk_id missing or not a UUID");
+  if (!isDiskId(diskId))
+    return out.refuse(400, "disk_id missing or not vm-<uuid> / vol-<uuid>");
 
   text_t d = TEXT`${diskId}`;
   d.into(out->disk, sizeof out->disk);
@@ -655,7 +655,7 @@ static void attest(release_t *out, json_t req) {
 
 /** The session as attest left it. */
 typedef struct {
-  char disk[40];
+  char disk[48];
   bool renew, ending, persist;
   char secretHash[65], quoteNonce[65], ek[65], reportId[65], chipId[129], hostData[65];
   unsigned char ak[512], guestPub[1024];

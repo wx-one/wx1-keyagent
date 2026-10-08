@@ -185,6 +185,9 @@ static http_response_t apiResetLease(http_request_t *req) {
   if (!bearer(req, customerToken))
     return refused(req, 401, "unauthorized");
 
+  if (!isDiskId(req.param("id")))
+    return refused(req, 400, "bad disk ID");
+
   if (!storeResetLease(req.param("id")))
     return refused(req, 503, "cannot reset the lease");
 

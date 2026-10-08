@@ -9,14 +9,14 @@
  * Taking rights away (detach) applies at once; giving them needs an approval
  * or a rule.
  *
- * Two kinds of disk, as the platform has them:
- *   system  the one disk bound to a VM. It has no ID of its own: it is
- *           named by the VM's UUID, created with the VM (create) and never
- *           attached to another one. When the VM goes (detach), its binding
- *           goes at once and the customer is asked whether to shred the key.
- *   volume  a disk of its own (create_volume), attached to at most one VM at
- *           a time (attach, detach), bound to that VM's HOST_DATA.
- * Entries without a kind are from before this split and keep the old rules.
+ * Two kinds of disk, named as the platform names them:
+ *   vm-<uuid>   the one disk bound to that VM, its system disk. It has no ID
+ *               of its own, is created with the VM (create) and never
+ *               attached to another one. When the VM goes (detach), its
+ *               binding goes at once and the customer is asked whether to
+ *               shred the key.
+ *   vol-<uuid>  a volume of its own (create_volume), attached to at most one
+ *               VM at a time (attach, detach), bound to that VM's HOST_DATA.
  */
 #ifndef WX_REQUESTS_H
 #define WX_REQUESTS_H
@@ -303,23 +303,23 @@ static bool checkCloudInit(checks_t *checks, json_t p, settings_t *settings) {
 }
 
 /**
- * Which disk a request means: a system disk is named by its VM, so create
- * takes the VM's UUID; everything else the disk_id if there is one, else
- * the VM's (the system disk again).
+ * Which disk a request means, into `out`: create makes the VM's system disk,
+ * vm-<vm_uuid>; everything else names its disk_id, or without one the VM's
+ * system disk again.
  */
-static const char *diskOf(const char *type, json_t p) {
+static const char *diskOf(const char *type, json_t p, char out[48]) {
 
   const char *disk = p.get("disk_id").text();
 
-  if (strcmp(type, "create") == 0 || disk[0] == 0)
-    return p.get("vm_uuid").text();
+  if (strcmp(type, "create") == 0 || disk[0] == 0) {
+    text_t t = TEXT`vm-${p.get("vm_uuid").text()}`;
+    t.into(out, 48);
+  } else {
+    text_t t = TEXT`${disk}`;
+    t.into(out, 48);
+  }
 
-  return disk;
-}
-
-/** "system", "volume", or "" for a disk from before the split. */
-static const char *kindOf(bao_entry_t *disk) {
-  return disk->found ? disk->payload().get("kind").text() : "";
+  return out;
 }
 
 /**
@@ -328,8 +328,9 @@ static const char *kindOf(bao_entry_t *disk) {
  */
 static bool validate(checks_t *checks, const char *type, json_t p) {
 
+  char diskBuf[48];
   settings_t settings = settingsRead();
-  const char *diskId = diskOf(type, p);
+  const char *diskId = diskOf(type, p, diskBuf);
   bao_entry_t disk = storeGet("disks", diskId);
   bao_entry_t att = storeGet("attachments", diskId);
   bool active = disk.found && strcmp(disk.payload().get("status").text() ?: "", "active") == 0;
@@ -351,13 +352,16 @@ static bool validate(checks_t *checks, const char *type, json_t p) {
     inPool = false;
   }
 
-  const char *kind = kindOf(&disk);
+  bool system = isSystemDisk(diskId);
+
+  if (strcmp(type, "create") != 0)
+    checks.ok(isDiskId(diskId), "disk ID valid (vm-<uuid> or vol-<uuid>)");
 
   if (strcmp(type, "create") == 0) {
     const char *named = p.get("disk_id").text();
     checks.ok(named[0] == 0 || strcmp(named, diskId) == 0,
               "no disk ID of its own (a system disk is named by its VM)");
-    checks.ok(isUuid(diskId), "VM UUID valid");
+    checks.ok(isDiskId(diskId), "VM UUID valid");
     checks.ok(!disk.found, "the VM has no system disk yet");
     checkCloudInit(checks, p, &settings);
     checkInitdata(checks, p, diskId, "new", hostData);
@@ -365,28 +369,29 @@ static bool validate(checks_t *checks, const char *type, json_t p) {
        remarks stay on the request, to look at before data goes onto it */
     automatic = true;
   } else if (strcmp(type, "create_volume") == 0) {
-    checks.ok(isUuid(diskId), "volume ID valid");
+    checks.ok(!system, "a volume is named vol-<uuid>");
     checks.ok(!disk.found, "volume ID not taken yet");
     /* no VM, no data: nothing to take */
     automatic = true;
   } else if (strcmp(type, "attach") == 0) {
     checks.ok(active, "disk exists");
-    checks.ok(strcmp(kind, "system") != 0, "not a system disk (that belongs to its VM)");
+    checks.ok(!system, "not a system disk (that belongs to its VM)");
     checks.ok(!att.found, "disk attached to no other VM");
     bool safe = checkCloudInit(checks, p, &settings);
-    checkInitdata(checks, p, diskId, strcmp(kind, "volume") == 0 ? NULL : "existing", hostData);
+    checkInitdata(checks, p, diskId, NULL, hostData);
 
     /* a volume joins the VM as it is: the binding of the VM's system disk
        knows its HOST_DATA, and the provider cannot name another one */
-    if (strcmp(kind, "volume") == 0) {
-      bao_entry_t vm = storeGet("attachments", p.get("vm_uuid").text());
-      if (vm.found)
-        checks.ok(strcmp(vm.payload().get("host_data").text(), hostData) == 0,
-                  "initdata is the VM's own (as bound to its system disk)");
-      else
-        checks.note("the VM has no system disk here; bound to the initdata as sent");
-      vm.release();
-    }
+    char vmDisk[48];
+    text_t vd = TEXT`vm-${p.get("vm_uuid").text()}`;
+    vd.into(vmDisk, sizeof vmDisk);
+    bao_entry_t vm = storeGet("attachments", vmDisk);
+    if (vm.found)
+      checks.ok(strcmp(vm.payload().get("host_data").text(), hostData) == 0,
+                "initdata is the VM's own (as bound to its system disk)");
+    else
+      checks.note("the VM has no system disk here; bound to the initdata as sent");
+    vm.release();
 
     automatic = settings.flag("auto_attach") && safe && inPool;
   } else if (strcmp(type, "add_host") == 0) {
@@ -642,7 +647,8 @@ static void askToShred(const char *diskId, const char *vm, const char *vmName) {
 /** Carries out an approved request: keys, bindings, policy. NULL or why not. */
 static const char *apply(const char *type, json_t p) {
 
-  const char *diskId = diskOf(type, p);
+  char diskBuf[48];
+  const char *diskId = diskOf(type, p, diskBuf);
   const char *wrong = NULL;
   char key[200];
 
@@ -685,11 +691,7 @@ static const char *apply(const char *type, json_t p) {
 
   } else if (strcmp(type, "attach") == 0) {
 
-    bao_entry_t was = storeGet("disks", diskId);
-    bool volume = strcmp(kindOf(&was), "volume") == 0;
-    was.release();
-
-    if ((wrong = attach(p, diskId, !volume)) != NULL)
+    if ((wrong = attach(p, diskId, false)) != NULL)
       return wrong;
 
     /* a delete racing this one: whoever comes second sees the other */
@@ -719,11 +721,7 @@ static const char *apply(const char *type, json_t p) {
     /* the VM is gone, and with it its system disk on the host. The key stays
        until the customer says so: a provider that deletes VMs must not be
        able to make the customer's backups of them unreadable */
-    bao_entry_t was = storeGet("disks", diskId);
-    bool system = strcmp(kindOf(&was), "system") == 0;
-    was.release();
-
-    if (system)
+    if (isSystemDisk(diskId))
       askToShred(diskId, p.get("vm_uuid").text(), p.get("vm_name").text());
 
   } else if (strcmp(type, "delete_disk") == 0) {

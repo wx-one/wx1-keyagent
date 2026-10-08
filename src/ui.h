@@ -637,7 +637,7 @@ static void leaseTable(buf_t *out, settings_t *settings) {
 
   for (int i = 0; r != NULL && PQresultStatus(r) == PGRES_TUPLES_OK && i < PQntuples(r); ++i) {
     bool live = PQgetvalue(r, i, 4)[0] == 't';
-    buf_t__printf(out, "<tr><td><code>%.8s…</code></td><td><code>%.16s…</code></td><td>",
+    buf_t__printf(out, "<tr><td><code>%.12s…</code></td><td><code>%.16s…</code></td><td>",
                   PQgetvalue(r, i, 0), PQgetvalue(r, i, 1));
     chipLabel(out, settings, PQgetvalue(r, i, 2), NULL);
     buf_t__put(out, "</td><td>");
@@ -720,7 +720,7 @@ static void releaseLog(buf_t *out) {
 
     buf_t__put(out, "<tr><td>");
     when(out, atol(PQgetvalue(r, i, 0)), "%d.%m. %H:%M:%S");
-    buf_t__printf(out, "</td><td><code>%.8s</code></td><td>", PQgetvalue(r, i, 1));
+    buf_t__printf(out, "</td><td><code>%.12s</code></td><td>", PQgetvalue(r, i, 1));
     buf_t__html(out, PQgetvalue(r, i, 2));
     buf_t__printf(out, "</td><td class=%s>", ok ? "ok" : "bad");
     buf_t__html(out, detail);
@@ -772,7 +772,7 @@ static http_response_t uiDisks(http_request_t *req) {
     buf_t__put(&out, "<tr><td colspan=4 class=bad>OpenBao nicht erreichbar.</td></tr>");
 
   for (int i = 0; i < ids.count(); ++i)
-    if (isUuid(ids.at(i).text()))
+    if (isDiskId(ids.at(i).text()))
       diskRow(&out, ids.at(i).text(), &settings);
 
   if (!failed && ids.count() <= 0)
@@ -862,7 +862,7 @@ static void refusedChains(buf_t *out, settings_t *settings) {
       buf_t__put(out, "VM ");
       buf_t__html(out, att.payload().get("vm_name").text());
     } else {
-      buf_t__printf(out, "Disk %.8s…", PQgetvalue(r, i, 5));
+      buf_t__printf(out, "Disk %.12s…", PQgetvalue(r, i, 5));
     }
     if (disks > 1)
       buf_t__printf(out, " und %ld weitere", disks - 1);
@@ -1066,7 +1066,7 @@ static http_response_t uiMode(http_request_t *req) {
   for (int i = 0; i < 3; ++i)
     known = known || strcmp(modes[i][0], mode) == 0;
 
-  if (!isUuid(disk) || !known || interval < 0 || (window[0] != 0 && inWindow(window, time(NULL)) < 0) ||
+  if (!isDiskId(disk) || !known || interval < 0 || (window[0] != 0 && inWindow(window, time(NULL)) < 0) ||
       (strcmp(mode, "window") == 0 && window[0] == 0)) {
     form.release();
     return req.reply(400).text("Zeitfenster z. B. 'Mo-Fr 06:00-22:00' oder '06:00-22:00'");
@@ -1098,7 +1098,7 @@ static http_response_t uiLease(http_request_t *req) {
   if (!uiPost(req, &form, &no))
     return no;
 
-  if (isUuid(form.get("disk")))
+  if (isDiskId(form.get("disk")))
     storeResetLease(form.get("disk"));
 
   form.release();

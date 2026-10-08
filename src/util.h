@@ -172,6 +172,29 @@ static bool isHex(const char *s, size_t length) {
   return true;
 }
 
+/**
+ * A disk as the platform names it: "vm-<uuid>" is the one disk bound to that
+ * VM, "vol-<uuid>" a volume of its own. The prefix keeps the two apart for
+ * good - no VM's UUID can ever name a volume or the other way round.
+ */
+static bool isDiskId(const char *s) {
+
+  if (s == NULL)
+    return false;
+
+  if (strncmp(s, "vm-", 3) == 0)
+    return isUuid(s + 3);
+
+  if (strncmp(s, "vol-", 4) == 0)
+    return isUuid(s + 4);
+
+  return false;
+}
+
+static bool isSystemDisk(const char *s) {
+  return isDiskId(s) && s[1] == 'm';
+}
+
 /** Lowercase hex of any even, non-zero length. */
 static bool isHexText(const char *s) {
 
