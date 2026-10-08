@@ -42,9 +42,9 @@ mount /dev/mapper/daten /srv/daten
 ```
 
 Welches Gerät zu welchem Volume gehört: Die Plattform setzt als Seriennummer die UUID des
-Volumes (base64url-kodiert); `lsblk -o NAME,SERIAL` zeigt sie. Den Gerätenamen (`vdb`, ...)
-nennt auch die Anfrage *Volume an VM hängen*. Nach dem ersten Formatieren trägt das Volume
-seine ID als LUKS-Label, dann geht es eindeutig über `/dev/disk/by-label/<vol-uuid>`.
+Volumes (base64url-kodiert); `lsblk -o NAME,SERIAL` zeigt sie. Nach dem ersten Formatieren
+trägt das Volume seine ID als LUKS-Label, dann geht es eindeutig über
+`/dev/disk/by-label/<vol-uuid>`.
 
 Beim ersten Mal ist das Volume leer: dann zuerst formatieren, mit demselben Schlüssel:
 
