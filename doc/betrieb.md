@@ -19,6 +19,22 @@ Gehen die Datenbank-Inhalte verloren, gehen der Verlauf und die laufenden Leases
 keine Schlüssel. Geht OpenBao verloren, sind die Disks Ihrer VMs nicht mehr lesbar.
 **OpenBao gehört in Ihre Datensicherung.**
 
+## Angepasste Komponenten
+
+Die Kette, über die eine VM ihre Schlüssel bekommt, nutzt nicht nur Upstream-Software. An
+drei Stellen läuft eine angepasste Fassung; welche Patches das sind, was sie tun und was sie
+für die Sicherheit bedeuten, steht vollständig in `PATCHES.md` im Repository wx-build.
+
+| Komponente | wo sie läuft | was der wx1-keyagent davon braucht |
+|---|---|---|
+| **Trustee-KBS** (`wx/kbs:v0.22.0-wx`) | bei Ihnen | Der Verifier meldet die VMPL als Claim, statt Berichte mit `vmpl != 0` abzulehnen. Die Policy, die der wx1-keyagent schreibt, prüft dieses Claim (`snp.vmpl`): Disk-Schlüssel nur an das Gast-Linux (VMPL2), vTPM-State-Schlüssel nur an den SVSM (VMPL0). Ein unveränderter Trustee-KBS liefert das Claim nicht - dann lehnt die Policy alles ab. **Ihr KBS muss die angepasste Fassung sein.** Wer dort eine eigene Policy schreibt, muss `snp.vmpl` ebenso prüfen. |
+| **COCONUT-SVSM** | in jeder VM (vom Provider) | Bindet seinen Bericht so an die KBS-Sitzung, wie Trustee es nachrechnet. Ohne das bekäme der persistente vTPM seinen State-Schlüssel nicht. Das SVSM-Measurement in den Referenzwerten (`WX_REFS`) ist das dieser Fassung. |
+| **aproxy** | auf dem Host (vom Provider) | Leitet die Attestierung des SVSM an Ihren KBS weiter und fragt `vtpm/<HOST_DATA>/state` an. aproxy ist nicht vertrauenswürdig und muss es nicht sein: Ihr KBS gibt den Schlüssel nur an den SVSM, dessen signierter Bericht genau dieses HOST_DATA trägt. |
+
+Die Schlüsselfreigabe für Disks (`wx-release-client` → wx1-keyagent) läuft an KBS und aproxy
+vorbei und braucht keine dieser Anpassungen; sie prüft die Berichte selbst gegen AMDs
+Zertifikatskette.
+
 ## Einrichten
 
 ### OpenBao

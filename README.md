@@ -11,6 +11,10 @@ Written in meta (metalanguage) and served by nginx.
 - Operating it: [doc/betrieb.md](doc/betrieb.md)
 - Unlocking data volumes yourself: [doc/daten-volumes.md](doc/daten-volumes.md)
 - OpenBao policy: [deploy/openbao-policy.hcl](deploy/openbao-policy.hcl)
+- It relies on patched upstream components - the Trustee KBS (VMPL reported as a claim),
+  COCONUT-SVSM and its aproxy. What each patch does and what it means for security:
+  `PATCHES.md` in the wx-build repository; what the agent needs of them:
+  [doc/betrieb.md, "Angepasste Komponenten"](doc/betrieb.md#angepasste-komponenten).
 
 ## Build and test
 
