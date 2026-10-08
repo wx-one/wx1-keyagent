@@ -808,6 +808,83 @@ static http_response_t uiDisks(http_request_t *req) {
 
 /* --------------------------------------------------------- rules & hosts */
 
+/** Whether PCR 4/8/9 are among the approved sets in the settings. */
+static bool chainApproved(settings_t *settings, const char *p4, const char *p8, const char *p9) {
+
+  json_t refs = settings->data.get("pcr_refs");
+
+  for (int i = 0; settings->entry.found && i < refs.count(); ++i) {
+    json_t r = refs.at(i);
+    if (strcmp(r.get("4").text(), p4) == 0 && strcmp(r.get("8").text(), p8) == 0 &&
+        strcmp(r.get("9").text(), p9) == 0)
+      return true;
+  }
+
+  return false;
+}
+
+/**
+ * Boot chains refused in the last 7 days, one row per PCR set: which VM,
+ * how often, when last. The log itself scrolls past them within minutes.
+ */
+static void refusedChains(buf_t *out, settings_t *settings) {
+
+  sql_t q = SQL`select ctx->'pcrs'->>'4', ctx->'pcrs'->>'8', ctx->'pcrs'->>'9', count(*),
+      extract(epoch from max(ts))::INT8, min(disk_id), count(distinct disk_id)
+    from releases
+    where not ok and detail like 'boot chain%' and ts > now() - interval '7 days'
+      and length(ctx->'pcrs'->>'9') = 64
+    group by 1, 2, 3 order by 5 desc limit 20`;
+  PGresult *r = dbAsk(&q);
+  q.release();
+
+  buf_t__put(out, "<div class=card><h2>Abgelehnte Bootketten (letzte 7 Tage)</h2><div class=mut>"
+                  "VMs, die mit einer Bootkette starten wollten, die du noch nicht freigegeben hast "
+                  "- etwa nach einem Kernel-Update in der VM. Erst freigeben, wenn du weisst, warum "
+                  "sie sich geaendert hat.</div>");
+
+  int shown = 0;
+
+  for (int i = 0; r != NULL && PQresultStatus(r) == PGRES_TUPLES_OK && i < PQntuples(r); ++i) {
+
+    const char *p4 = PQgetvalue(r, i, 0), *p8 = PQgetvalue(r, i, 1), *p9 = PQgetvalue(r, i, 2);
+
+    if (!isHex(p4, 64) || !isHex(p8, 64) || !isHex(p9, 64) || chainApproved(settings, p4, p8, p9))
+      continue;
+
+    bao_entry_t att = storeGet("attachments", PQgetvalue(r, i, 5));
+    long disks = atol(PQgetvalue(r, i, 6));
+
+    buf_t__printf(out, "<div style='margin-top:10px'><code>PCR4=%.12s… PCR8=%.12s… PCR9=%.12s…</code>"
+                       "<div class=mut>", p4, p8, p9);
+    if (att.found) {
+      buf_t__put(out, "VM ");
+      buf_t__html(out, att.payload().get("vm_name").text());
+    } else {
+      buf_t__printf(out, "Disk %.8s…", PQgetvalue(r, i, 5));
+    }
+    if (disks > 1)
+      buf_t__printf(out, " und %ld weitere", disks - 1);
+    buf_t__printf(out, " · %s Versuche · zuletzt ", PQgetvalue(r, i, 3));
+    when(out, atol(PQgetvalue(r, i, 4)), "%d.%m. %H:%M");
+    buf_t__put(out, "</div><form method=post action='/pcr-ref' style='margin-top:4px'>");
+    csrfField(out);
+    buf_t__printf(out, "<input type=hidden name=back value=settings><input type=hidden name=p4 value='%s'>"
+                       "<input type=hidden name=p8 value='%s'><input type=hidden name=p9 value='%s'>"
+                       "<button class=btn>Diese Bootkette freigeben</button></form></div>", p4, p8, p9);
+    att.release();
+    ++shown;
+  }
+
+  if (shown == 0)
+    buf_t__put(out, "<div class=mut style='margin-top:8px'>Keine.</div>");
+
+  buf_t__put(out, "</div>");
+
+  if (r != NULL)
+    PQclear(r);
+}
+
 static http_response_t uiSettings(http_request_t *req) {
 
   if (req->localPort != apiPort)
@@ -876,8 +953,8 @@ static http_response_t uiSettings(http_request_t *req) {
 
   buf_t__put(&out, "<div class=card><h2>Freigegebene Bootketten (PCR 4/8/9)</h2><div class=mut>"
                    "Bootloader, GRUB-Befehle und Kernel/initrd der VMs. Nur diese duerfen "
-                   "Disk-Schluessel bekommen. Neue kommen aus abgelehnten Abrufen auf der Seite "
-                   "Disks.</div>");
+                   "Disk-Schluessel bekommen. Neue gibst du unten unter \"Abgelehnte Bootketten\" "
+                   "frei.</div>");
   for (int i = 0; i < refs.count(); ++i) {
     json_t r = refs.at(i);
     char p4[13], p8[13], p9[13];
@@ -895,9 +972,19 @@ static http_response_t uiSettings(http_request_t *req) {
     buf_t__html(&out, p9);
     buf_t__put(&out, "…</code> <span class=mut>");
     buf_t__html(&out, r.get("label").text());
-    buf_t__put(&out, "</span></div>");
+    buf_t__put(&out, "</span>");
+    if (isHex(r.get("4").text(), 64) && isHex(r.get("8").text(), 64) && isHex(r.get("9").text(), 64)) {
+      buf_t__put(&out, "<form method=post action='/pcr-ref-remove' style='display:inline;margin-left:8px'>");
+      csrfField(&out);
+      buf_t__printf(&out, "<input type=hidden name=p4 value='%s'><input type=hidden name=p8 value='%s'>"
+                          "<input type=hidden name=p9 value='%s'><button class='btn dan'>Entfernen"
+                          "</button></form>", r.get("4").text(), r.get("8").text(), r.get("9").text());
+    }
+    buf_t__put(&out, "</div>");
   }
   buf_t__put(&out, "</div>");
+
+  refusedChains(&out, &settings);
 
   settings.release();
 
@@ -1057,9 +1144,51 @@ static http_response_t uiPcrRef(http_request_t *req) {
   if (isHex(ref.value[0], 64) && isHex(ref.value[1], 64) && isHex(ref.value[2], 64))
     baoEdit("settings", addPcrRef, &ref);
 
+  bool fromSettings = strcmp(form.get("back"), "settings") == 0;
   form.release();
 
-  return uiBack(req, "/disks");
+  return uiBack(req, fromSettings ? "/settings" : "/disks");
+}
+
+static bool removePcrRef(yyjson_mut_doc *doc, yyjson_mut_val *root, void *with) {
+
+  static const char *const keys[] = {"4", "8", "9"};
+  pcr_ref_t *ref = (pcr_ref_t *)with;
+  yyjson_mut_val *refs = yyjson_mut_obj_get(root, "pcr_refs");
+  size_t count = yyjson_mut_arr_size(refs);
+
+  (void)doc;
+
+  for (size_t i = 0; yyjson_mut_is_arr(refs) && i < count; ++i) {
+    yyjson_mut_val *have = yyjson_mut_arr_get(refs, i);
+    int same = 0;
+    for (int k = 0; k < 3; ++k)
+      same += yyjson_mut_equals_str(yyjson_mut_obj_get(have, keys[k]), ref->value[k]);
+    if (same == 3) {
+      yyjson_mut_arr_remove(refs, i);
+      return true;
+    }
+  }
+
+  return false;
+}
+
+static http_response_t uiPcrRefRemove(http_request_t *req) {
+
+  form_t form;
+  http_response_t no;
+
+  if (!uiPost(req, &form, &no))
+    return no;
+
+  pcr_ref_t ref = {{form.get("p4"), form.get("p8"), form.get("p9")}, ""};
+
+  if (isHex(ref.value[0], 64) && isHex(ref.value[1], 64) && isHex(ref.value[2], 64))
+    baoEdit("settings", removePcrRef, &ref);
+
+  form.release();
+
+  return uiBack(req, "/settings");
 }
 
 /** One line per host: "<hv-uuid> <chip_id> [name ...]"; anything else is dropped. */
@@ -1149,6 +1278,7 @@ static void uiRoutes(void) {
   http.post("/lease", uiLease);
   http.post("/vtpm-reset", uiVtpmReset);
   http.post("/pcr-ref", uiPcrRef);
+  http.post("/pcr-ref-remove", uiPcrRefRemove);
   http.post("/settings", uiSaveSettings);
 }
 
