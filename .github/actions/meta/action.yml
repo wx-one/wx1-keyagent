@@ -1,0 +1,22 @@
+name: meta
+description: meta from the wxone/meta image, at /opt/meta (where it has to live)
+inputs:
+  image:
+    required: false
+    default: wxone/meta:latest
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        IMAGE: ${{ inputs.image }}
+      run: |
+        set -eu
+        docker pull -q "$IMAGE"
+        container=$(docker create "$IMAGE")
+        sudo docker cp "$container:/opt/meta" /opt/meta
+        docker rm "$container" >/dev/null
+        sudo chown -R "$(id -u):$(id -g)" /opt/meta
+        test -x /opt/meta/meta
+        test -f /opt/meta/lib/libmeta_runtime.a
+        echo "META_ROOT=/opt/meta" >>"$GITHUB_ENV"

@@ -1,0 +1,27 @@
+# systemd unit for a release unpacked to /opt/wx1-keyagent.
+# Settings (WX_*) in /etc/wx1-keyagent.env, secrets as files under /etc/wx1-keyagent/secrets.
+[Unit]
+Description=wx1-keyagent - the customer's key release for confidential VMs
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+User=wx1-keyagent
+Group=wx1-keyagent
+EnvironmentFile=/etc/wx1-keyagent.env
+Environment=WX_STATE_DIR=/var/lib/wx1-keyagent
+Environment=WX_KDS=/var/lib/wx1-keyagent/kds
+StateDirectory=wx1-keyagent
+ExecStart=/opt/wx1-keyagent/bin/wx1-keyagent
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+LimitNOFILE=65536
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ReadWritePaths=/var/lib/wx1-keyagent
+
+[Install]
+WantedBy=multi-user.target

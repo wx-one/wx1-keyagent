@@ -17,9 +17,15 @@ Written in meta (metalanguage) and served by nginx.
 ## Build and test
 
 ```
-./build.sh                    # image wx/wx1-keyagent; META=<path to metalanguage>
+ci/build.sh <version>         # the release tarball, against meta at /opt/meta (the wxone/meta image)
+./build.sh                    # an image wx/wx1-keyagent from a metalanguage checkout (META=<path>)
 test/local.sh                 # CockroachDB, OpenBao, a KBS stub and the agent in Docker, then test/api.sh
+IMAGE=<image> NO_BUILD=1 test/local.sh   # the same against another image, e.g. one from ci/Dockerfile.release
 ```
+
+CI (`.github/workflows/build.yml`) builds the release on ubuntu-24.04 with meta from the
+`wxone/meta` image (repository variable `META_IMAGE` pins one), runs `test/api.sh` against
+it in a plain ubuntu:24.04, and on a tag `v*` publishes it as a GitHub release.
 
 `test/tpmtest.c` and `test/snptest.c` check the TPM and SNP code against swtpm and real
 guest reports.

@@ -1,0 +1,73 @@
+name: build
+
+on:
+  push:
+    branches: [master]
+    tags: ['v*']
+  pull_request:
+
+jobs:
+  build:
+    # meta's builtinDefines.h comes from the compiler the image was built with:
+    # ubuntu:24.04, so the runner is ubuntu-24.04 and uses its system gcc
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/meta
+        with:
+          image: ${{ vars.META_IMAGE || 'wxone/meta:latest' }}
+      - name: build dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
+            build-essential curl ca-certificates pkg-config \
+            libpq-dev libcurl4-openssl-dev libssl-dev libyaml-dev libpcre2-dev zlib1g-dev
+      - name: build
+        run: |
+          version=${GITHUB_REF_NAME#v}
+          [[ "$GITHUB_REF" == refs/tags/v* ]] || version=0.0.0-${GITHUB_SHA::12}
+          echo "VERSION=$version" >>"$GITHUB_ENV"
+          ci/build.sh "$version"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release
+          path: |
+            out/wx1-keyagent-*.tar.gz
+            out/wx1-keyagent-*.tar.gz.sha256
+
+  test:
+    # the released binary in a plain ubuntu:24.04, against CockroachDB, OpenBao
+    # and a KBS stub: the whole of test/api.sh
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: release
+          path: out
+      - name: image from the release
+        run: |
+          release=$(basename out/wx1-keyagent-*.tar.gz .tar.gz)
+          docker build -q -f ci/Dockerfile.release --build-arg RELEASE="$release" \
+            -t wx/wx1-keyagent:ci out
+      - name: test/api.sh
+        run: IMAGE=wx/wx1-keyagent:ci NO_BUILD=1 test/local.sh
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: test
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: release
+          path: out
+      - name: publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" out/wx1-keyagent-* \
+            --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --generate-notes

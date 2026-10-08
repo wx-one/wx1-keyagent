@@ -40,6 +40,28 @@ prüft die Berichte selbst gegen AMDs Zertifikatskette.
 
 ## Einrichten
 
+### Installieren
+
+Die Release ist ein Tarball für x86-64 (`wx1-keyagent-<version>-linux-x86_64.tar.gz`, mit
+`.sha256`): nginx mit dem Modul des wx1-keyagent, ein Startskript, eine systemd-Unit, die
+OpenBao-Policy und diese Doku. Gebaut auf Ubuntu 24.04; dort braucht er zur Laufzeit nur:
+
+```
+apt install libpq5 libcurl4t64 libssl3t64 libyaml-0-2 libpcre2-8-0 zlib1g ca-certificates
+```
+
+```
+sha256sum -c wx1-keyagent-<version>-linux-x86_64.tar.gz.sha256
+tar -xzf wx1-keyagent-<version>-linux-x86_64.tar.gz -C /opt
+mv /opt/wx1-keyagent-<version>-linux-x86_64 /opt/wx1-keyagent
+useradd --system --home /var/lib/wx1-keyagent wx1-keyagent
+cp /opt/wx1-keyagent/wx1-keyagent.service /etc/systemd/system/
+# Einstellungen (WX_*) nach /etc/wx1-keyagent.env, Geheimnisse als Dateien
+systemctl enable --now wx1-keyagent
+```
+
+Ohne systemd: `WX_STATE_DIR=<beschreibbares Verzeichnis> /opt/wx1-keyagent/bin/wx1-keyagent`.
+
 ### OpenBao
 
 ```

@@ -1,0 +1,36 @@
+#!/bin/sh
+# Starts wx1-keyagent: nginx with its module. What meta's meta-http does, so
+# the release needs nothing from meta at run time.
+#
+# The module, once nginx loads it, runs the program inside nginx's master,
+# writes the real configuration from it (ports, TLS, workers) and has nginx
+# read it. So this writes only enough for nginx to load the module.
+#
+#   WX_STATE_DIR   nginx's working directory (default /var/lib/wx1-keyagent)
+#   everything else: the WX_* settings in doc/betrieb.md
+set -eu
+
+here=$(cd "$(dirname "$0")/.." && pwd)
+state=${WX_STATE_DIR:-/var/lib/wx1-keyagent}
+module=$here/modules/ngx_http_meta_module.so
+
+mkdir -p "$state/conf" "$state/logs"
+chmod 700 "$state"
+
+cat > "$state/conf/nginx.conf" <<CONF
+# Written by bin/wx1-keyagent, and replaced by the module a moment later.
+load_module $module;
+
+daemon off;
+error_log stderr info;
+pid logs/meta.pid;
+
+events { worker_connections 64; }
+
+http { }
+CONF
+
+# the module reads this to write itself back into the configuration
+export META_HTTP_MODULE="$module"
+
+exec "$here/sbin/nginx" -c "$state/conf/nginx.conf" -p "$state"
