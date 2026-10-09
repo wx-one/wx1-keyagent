@@ -20,20 +20,52 @@
 /* what libraries read from the environment themselves, back in each worker */
 static const char *const libraryEnvironment[] = {"SSL_CERT_FILE", "SSL_CERT_DIR", "TZ", NULL};
 
+/* Once, in the launcher: what is missing is said here and not by every
+   worker. Without OpenBao - its token and the state mount wx/ - the agent
+   has nothing to release and nothing to decide on, so it does not start
+   (and its supervisor tries again); without a token or the UI password
+   only that door stays closed. What is read here is gone with the
+   launcher's execv - the workers read it again for themselves. */
+static int checkSettings(void) {
+
+  if (!baoConfigure()) {
+    fprintf(stderr, "wx1-keyagent: no OpenBao token in %s, nothing to release without it\n",
+            env("WX_OPENBAO_TOKEN_FILE", "/secrets/openbao-token"));
+    return 1;
+  }
+
+  fetch_answer_t health = baoCall("GET", "sys/health", NULL);
+  int reached = health.status;
+  health.release();
+
+  if (reached == 0) {
+    fprintf(stderr, "wx1-keyagent: OpenBao does not answer at %s\n", baoUrl);
+    return 1;
+  }
+
+  if (!baoEnsureStateMount()) {
+    fprintf(stderr, "wx1-keyagent: the state mount wx/ in OpenBao is missing or not ours: "
+                    "bao secrets enable -path=wx -version=2 kv, and a token with "
+                    "deploy/openbao-policy.hcl\n");
+    return 1;
+  }
+
+  apiConfigure(true);
+  uiConfigure(true);
+
+  return 0;
+}
+
 static int startWorker(void) {
 
   envRestore(libraryEnvironment);
   tzset();
 
   if (!baoConfigure())
-    fprintf(stderr, "wx1-keyagent: no OpenBao token\n");
-  else if (!baoEnsureStateMount())
-    fprintf(stderr, "wx1-keyagent: the state mount wx/ in OpenBao is missing or not ours: "
-                    "bao secrets enable -path=wx -version=2 kv, and a token with "
-                    "deploy/openbao-policy.hcl\n");
+    return 1;
 
-  apiConfigure();
-  uiConfigure();
+  apiConfigure(false);
+  uiConfigure(false);
 
   return dbConnect();
 }
@@ -93,6 +125,7 @@ int main(void) {
   if (atoi(env("WX_WORKERS", "0")) > 0)
     http.workers(atoi(env("WX_WORKERS", "0")));
 
+  http.once(checkSettings);
   http.once(dbMigrate);
   http.eachWorker(startWorker);
 

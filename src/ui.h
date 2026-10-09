@@ -17,11 +17,12 @@ static char uiPassword[256];
 static char uiExpect[512]; /* "Basic base64(kunde:password)" */
 static char uiCsrf[65];
 
-static void uiConfigure(void) {
+static void uiConfigure(bool say) {
 
   if (!readSecret(env("WX_UI_PASSWORD_FILE", "/secrets/ui-password"), uiPassword,
                   sizeof uiPassword)) {
-    fprintf(stderr, "wx1-keyagent: no UI password, the UI is closed\n");
+    if (say)
+      fprintf(stderr, "wx1-keyagent: no UI password, the UI is closed\n");
     return;
   }
 

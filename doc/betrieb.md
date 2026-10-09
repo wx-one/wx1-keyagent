@@ -97,6 +97,10 @@ Alle als Dateien, nicht in der Umgebung (die sieht jede Prozessliste):
 | `/secrets/customer-token` | Ihr Token für die API (Freigaben, Leases, ...) |
 | `/secrets/ui-password` | Passwort der UI, Benutzer `kunde` |
 
+Ohne OpenBao-Token oder ohne den State-Mount `wx/` startet der Agent nicht (systemd bzw.
+Docker mit `--restart` versucht es erneut). Fehlt eines der anderen, bleibt nur die
+zugehörige Tür zu; der Start sagt einmal, welche.
+
 ### TLS
 
 Die API (Anfragen des Providers, Ihre API, die UI) sollte TLS sprechen; der Provider

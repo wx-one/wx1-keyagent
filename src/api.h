@@ -33,16 +33,17 @@ static const char *cpClientSubject;
 static int apiPort;
 static int releasePort;
 
-static void apiConfigure(void) {
+static void apiConfigure(bool say) {
 
   cpClientCa = env("WX_CP_CLIENT_CA", NULL);
   cpClientSubject = env("WX_CP_CLIENT_SUBJECT", NULL);
 
-  if (!readSecret(env("WX_CP_TOKEN_FILE", "/secrets/cp-token"), cpToken, sizeof cpToken))
+  if (!readSecret(env("WX_CP_TOKEN_FILE", "/secrets/cp-token"), cpToken, sizeof cpToken) && say)
     fprintf(stderr, "wx1-keyagent: no control plane token, its API is closed\n");
 
   if (!readSecret(env("WX_CUSTOMER_TOKEN_FILE", "/secrets/customer-token"), customerToken,
-                  sizeof customerToken))
+                  sizeof customerToken) &&
+      say)
     fprintf(stderr, "wx1-keyagent: no customer token, the customer API is closed\n");
 }
 
