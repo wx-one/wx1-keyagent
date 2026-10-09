@@ -95,18 +95,11 @@ static http_response_t answer(http_request_t *req, int code, const char *json) {
 static http_response_t refused(http_request_t *req, int code, const char *why) {
 
   char text[300];
-  yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
-  yyjson_mut_val *o = yyjson_mut_obj(doc);
+  obj error = {error: why};
 
-  yyjson_mut_doc_set_root(doc, o);
-  yyjson_mut_obj_add_str(doc, o, "error", why);
-
-  char *json = yyjson_mut_write(doc, 0, NULL);
-  text_t t = TEXT`${json ?: "{}"}`;
-  t.into(text, sizeof text);
-
-  free(json);
-  yyjson_mut_doc_free(doc);
+  /* toJSON leaves it empty when it does not fit: the reasons are short */
+  if (error.toJSON(text, sizeof text) >= sizeof text)
+    snprintf(text, sizeof text, "{\"error\":\"refused\"}");
 
   return answer(req, code, text);
 }

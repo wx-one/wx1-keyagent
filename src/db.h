@@ -48,16 +48,10 @@ static void dbMigrateSays(int level, const char *line) {
 static int dbMigrate(void) {
 
   char why[512] = "";
-  yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
-  yyjson_mut_val *config = yyjson_mut_obj(doc);
-
-  yyjson_mut_doc_set_root(doc, config);
-  yyjson_mut_obj_add_str(doc, config, "driver", dbDriver());
-  yyjson_mut_obj_add_str(doc, config, "url", dbUrl());
 
   dbmSetLogger(dbMigrateSays);
 
-  json_t settings = meta_jsonFromMut(doc);
+  json_t settings = {driver: dbDriver(), url: dbUrl()};
   int failed = dbmMigrateUp(settings, NULL, why, sizeof why);
   settings.release();
 

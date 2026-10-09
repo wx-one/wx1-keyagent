@@ -469,9 +469,9 @@ static bool lostRace(const char *wrong) {
 }
 
 /** A new entry, written only if there is none yet; `*taken` if there was. */
-static bool baoCreate(const char *key, yyjson_mut_doc *doc, bool *taken) {
+static bool baoCreate(const char *key, json_t entry, bool *taken) {
 
-  char *json = yyjson_mut_write(doc, 0, NULL);
+  char *json = jsonText(entry);
   bool conflict = false;
   bool written = json != NULL && baoWrite(key, json, 0, &conflict);
 
@@ -535,28 +535,20 @@ static const char *attach(json_t p, const char *diskId, bool withVtpm) {
 
   sha256Hex(raw.at, (size_t)raw.length, hostData);
 
-  yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
-  yyjson_mut_val *a = yyjson_mut_obj(doc);
-  yyjson_mut_val *chips = yyjson_mut_arr(doc);
-  yyjson_mut_doc_set_root(doc, a);
-  yyjson_mut_obj_add_strcpy(doc, a, "vm_uuid", p.get("vm_uuid").text() ?: "");
-  yyjson_mut_obj_add_strcpy(doc, a, "vm_name", p.get("vm_name").text() ?: "");
-  yyjson_mut_obj_add_strcpy(doc, a, "host_data", hostData);
-  yyjson_mut_obj_add_strncpy(doc, a, "initdata", raw.at, (size_t)raw.length);
-  yyjson_mut_obj_add_strncpy(doc, a, "user_data", userData.at ?: "",
-                             userData.length > 0 ? (size_t)userData.length : 0);
-  yyjson_mut_arr_add_strcpy(doc, chips, p.get("chip_id").text() ?: "");
-  yyjson_mut_obj_add_val(doc, a, "chip_ids", chips);
-  yyjson_mut_obj_add_int(doc, a, "created", (int64_t)time(NULL));
-  yyjson_mut_obj_add_bool(doc, a, "main", withVtpm);
+  /* initdata and user-data as text (blobOf ends them): cloud-config, never bytes */
+  const char *vm = p.get("vm_uuid").text(), *vmName = p.get("vm_name").text();
+  long now = (long)time(NULL);
+  json_t binding = {vm_uuid: vm, vm_name: vmName, host_data: hostData, initdata: raw.at,
+                    user_data: userData.at ?: "", chip_ids: [p.get("chip_id").text()],
+                    created: now, main: withVtpm};
 
   text_t at = TEXT`attachments/${diskId}`;
   at.into(key, sizeof key);
 
-  if (!baoCreate(key, doc, &taken))
+  if (!baoCreate(key, binding, &taken))
     wrong = taken ? lostAttached : "cannot write the binding (OpenBao)";
 
-  yyjson_mut_doc_free(doc);
+  binding.release();
   free(raw.at);
   free(userData.at);
 
@@ -564,25 +556,20 @@ static const char *attach(json_t p, const char *diskId, bool withVtpm) {
   if (wrong != NULL || !withVtpm)
     return wrong;
 
-  doc = yyjson_mut_doc_new(NULL);
-  yyjson_mut_val *v = yyjson_mut_obj(doc);
-  yyjson_mut_doc_set_root(doc, v);
-  yyjson_mut_obj_add_strcpy(doc, v, "disk_id", diskId);
-  yyjson_mut_obj_add_strcpy(doc, v, "vm_uuid", p.get("vm_uuid").text() ?: "");
-  yyjson_mut_obj_add_strcpy(doc, v, "vm_name", p.get("vm_name").text() ?: "");
-  yyjson_mut_obj_add_int(doc, v, "created", (int64_t)time(NULL));
+  json_t vtpm = {disk_id: diskId, vm_uuid: vm, vm_name: vmName, created: now};
 
   text_t vt = TEXT`vtpm/${hostData}`;
   vt.into(key, sizeof key);
 
-  if (baoCreate(key, doc, &taken)) {
+  bool made = baoCreate(key, vtpm, &taken);
+  vtpm.release();
+
+  if (made) {
     if (!newVtpmKey(hostData))
       wrong = "cannot write the vTPM state key (OpenBao)";
   } else if (!taken) {
     wrong = "cannot write the vTPM entry (OpenBao)";
   }
-
-  yyjson_mut_doc_free(doc);
 
   return wrong;
 }
@@ -643,9 +630,7 @@ static const char *deleteDisk(const char *diskId) {
   bool failed = false;
   const char *wrong = NULL;
 
-  json_t deleting = meta_toJSON("{\"status\":\"deleting\"}");
-  bool marked = storeSet("disks", diskId, deleting);
-  deleting.release();
+  bool marked = storeSet("disks", diskId, {status: "deleting"});
 
   if (!marked)
     return "cannot mark the disk (OpenBao)";
@@ -656,9 +641,7 @@ static const char *deleteDisk(const char *diskId) {
   att.release();
 
   if (attached) {
-    json_t active = meta_toJSON("{\"status\":\"active\"}");
-    storeSet("disks", diskId, active);
-    active.release();
+    storeSet("disks", diskId, {status: "active"});
     return "disk is attached to a VM";
   }
 
@@ -691,9 +674,7 @@ static const char *deleteDisk(const char *diskId) {
     return "cannot list the vTPMs (OpenBao)";
 
   if (wrong == NULL) {
-    json_t deleted = meta_toJSON("{\"status\":\"deleted\"}");
-    storeSet("disks", diskId, deleted);
-    deleted.release();
+    storeSet("disks", diskId, {status: "deleted"});
   }
 
   return wrong;
@@ -702,14 +683,9 @@ static const char *deleteDisk(const char *diskId) {
 /** Files a delete_disk request for the customer to decide. */
 static void askToShred(const char *diskId, const char *vm, const char *vmName) {
 
-  yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
-  yyjson_mut_val *p = yyjson_mut_obj(doc);
-  yyjson_mut_doc_set_root(doc, p);
-  yyjson_mut_obj_add_strcpy(doc, p, "disk_id", diskId);
-  yyjson_mut_obj_add_strcpy(doc, p, "vm_uuid", vm);
-  yyjson_mut_obj_add_strcpy(doc, p, "vm_name", vmName);
-  char *payload = yyjson_mut_write(doc, 0, NULL);
-  yyjson_mut_doc_free(doc);
+  json_t p = {disk_id: diskId, vm_uuid: vm, vm_name: vmName};
+  char *payload = jsonText(p);
+  p.release();
 
   static const char note[] =
       "[[null, \"the VM was deleted; approving shreds the key of its system disk for good\"]]";
@@ -736,18 +712,15 @@ static const char *apply(const char *type, json_t p) {
 
     bool system = strcmp(type, "create") == 0;
     bool taken = false;
-    yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
-    yyjson_mut_val *d = yyjson_mut_obj(doc);
-    yyjson_mut_doc_set_root(doc, d);
-    yyjson_mut_obj_add_str(doc, d, "status", "creating");
-    yyjson_mut_obj_add_str(doc, d, "kind", system ? "system" : "volume");
-    yyjson_mut_obj_add_int(doc, d, "created", (int64_t)time(NULL));
+    const char *kind = system ? "system" : "volume";
+    long now = (long)time(NULL);
+    json_t entry = {status: "creating", kind: kind, created: now};
 
     text_t at = TEXT`disks/${diskId}`;
     at.into(key, sizeof key);
 
-    bool made = baoCreate(key, doc, &taken);
-    yyjson_mut_doc_free(doc);
+    bool made = baoCreate(key, entry, &taken);
+    entry.release();
 
     if (!made)
       return taken ? lostTaken : "cannot write the disk (OpenBao)";
@@ -759,9 +732,7 @@ static const char *apply(const char *type, json_t p) {
     if (system && (wrong = attach(p, diskId, true)) != NULL)
       return wrong;
 
-    json_t active = meta_toJSON("{\"status\":\"active\"}");
-    bool done = storeSet("disks", diskId, active);
-    active.release();
+    bool done = storeSet("disks", diskId, {status: "active"});
 
     if (!done)
       return "cannot mark the disk active (OpenBao)";
@@ -775,9 +746,7 @@ static const char *apply(const char *type, json_t p) {
       return wrong;
 
     if (boot) {
-      json_t booted = meta_toJSON("{\"booted\":true}");
-      storeSet("disks", diskId, booted);
-      booted.release();
+      storeSet("disks", diskId, {booted: true});
     }
 
     /* a delete racing this one: whoever comes second sees the other */

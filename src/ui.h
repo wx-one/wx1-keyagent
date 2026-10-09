@@ -1924,19 +1924,7 @@ static http_response_t uiMode(http_request_t *req) {
         .text("Das Zeitfenster bitte so angeben: 'Mo-Fr 06:00-22:00' oder '06:00-22:00'.");
   }
 
-  yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
-  yyjson_mut_val *o = yyjson_mut_obj(doc);
-  yyjson_mut_doc_set_root(doc, o);
-  yyjson_mut_obj_add_strcpy(doc, o, "mode", mode);
-  yyjson_mut_obj_add_strcpy(doc, o, "window", window);
-  yyjson_mut_obj_add_int(doc, o, "replay_interval", interval);
-  char *json = yyjson_mut_write(doc, 0, NULL);
-  yyjson_mut_doc_free(doc);
-
-  json_t patch = meta_toJSON(json);
-  storeSet("disks", disk, patch);
-  patch.release();
-  free(json);
+  storeSet("disks", disk, {mode: mode, window: window, replay_interval: interval});
   http_response_t back = uiBack(req, &form, "/disks");
   form.release();
 

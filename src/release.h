@@ -254,38 +254,30 @@ static const char *admit(const char *diskId, const char *reportId, const char *c
                                          : TEXT`the disk asks for confirmation`;
   t.into(reason, sizeof reason);
 
+  /* PCR 4/8/9 under their numbers: a literal names its keys, so these as text
+     - hex only, nothing to escape */
+  char p4[65], p8[65], p9[65], chain[256];
+  toHex(pcrs->value[4], 32, p4);
+  toHex(pcrs->value[8], 32, p8);
+  toHex(pcrs->value[9], 32, p9);
+  snprintf(chain, sizeof chain, "{\"4\":\"%s\",\"8\":\"%s\",\"9\":\"%s\"}", p4, p8, p9);
+  json_t pcrSet = meta_toJSON(chain);
+
   bao_entry_t att = storeGet("attachments", diskId);
-  yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
-  yyjson_mut_val *p = yyjson_mut_obj(doc);
-  yyjson_mut_val *pv = yyjson_mut_obj(doc);
-  yyjson_mut_doc_set_root(doc, p);
-  yyjson_mut_obj_add_strcpy(doc, p, "disk_id", diskId);
-  yyjson_mut_obj_add_strcpy(doc, p, "report_id", reportId);
-  yyjson_mut_obj_add_strcpy(doc, p, "chip_id", chipId);
-  yyjson_mut_obj_add_strcpy(doc, p, "reason", reason);
-  yyjson_mut_obj_add_strcpy(doc, p, "vm_uuid", att.found ? att.payload().get("vm_uuid").text() ?: "" : "");
-  yyjson_mut_obj_add_strcpy(doc, p, "vm_name", att.found ? att.payload().get("vm_name").text() ?: "" : "");
-  for (int i = 4; i <= 9; i += (i == 4 ? 4 : 1)) {
-    char key[4], value[65];
-    text_t k = TEXT`${i}`;
-    k.into(key, sizeof key);
-    toHex(pcrs->value[i], 32, value);
-    yyjson_mut_obj_put(pv, yyjson_mut_strcpy(doc, key), yyjson_mut_strcpy(doc, value));
-  }
-  yyjson_mut_obj_add_val(doc, p, "pcrs", pv);
+  const char *vm = att.found ? att.payload().get("vm_uuid").text() : "";
+  const char *vmName = att.found ? att.payload().get("vm_name").text() : "";
+  json_t p = {disk_id: diskId, report_id: reportId, chip_id: chipId, reason: reason, vm_uuid: vm,
+              vm_name: vmName, pcrs: pcrSet};
+  char *payload = jsonText(p);
+  p.release();
+  pcrSet.release();
   att.release();
 
-  char *payload = yyjson_mut_write(doc, 0, NULL);
-  yyjson_mut_doc_free(doc);
-
-  yyjson_mut_doc *cdoc = yyjson_mut_doc_new(NULL);
-  yyjson_mut_val *list = yyjson_mut_arr(cdoc), *item = yyjson_mut_arr(cdoc);
-  yyjson_mut_doc_set_root(cdoc, list);
-  yyjson_mut_arr_add_null(cdoc, item);
-  yyjson_mut_arr_add_strcpy(cdoc, item, reason);
-  yyjson_mut_arr_append(list, item);
-  char *checks = yyjson_mut_write(cdoc, 0, NULL);
-  yyjson_mut_doc_free(cdoc);
+  /* the one remark the customer sees: why it waits */
+  checks_t remark = checksNew();
+  remark.note(reason);
+  char *checks = remark.json();
+  remark.release();
 
   sql_t insert = SQL`insert into requests (type, payload, status, checks)
     values ('unlock', ${payload ?: "{}"}::JSONB, 'pending', ${checks ?: "[]"}::JSONB)
