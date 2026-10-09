@@ -23,7 +23,10 @@ WORK=$OUT/work
 STAGE=$WORK/$NAME
 
 [ -x "$META_ROOT/meta" ] || { echo "no meta at $META_ROOT" >&2; exit 2; }
-[ -f "$META_ROOT/lib/libmeta_runtime.a" ] || { echo "no libmeta_runtime.a in $META_ROOT/lib" >&2; exit 2; }
+# an installed meta (the runtime as an archive), not a checkout
+"$META_ROOT/meta" -print-config | grep -q '^runtime-archive=/' \
+  || { echo "meta at $META_ROOT has no runtime archive (a checkout, not an installation?)" >&2; exit 2; }
+export YYJSON_H=$("$META_ROOT/meta" -print-config | sed -n 's/^vendored-yyjson=//p')
 
 # meta-db-migrate: the migrations are compiled in, the library linked in
 export DBM_VERSION=0.3.0
@@ -50,28 +53,29 @@ L=$DEPS/lib
 STATIC_LIBS="$L/libpq.a $L/libpgcommon_shlib.a $L/libpgport_shlib.a $L/libcurl.a $L/libyaml.a $L/libssl.a $L/libcrypto.a $L/libz.a"
 
 # ---------------------------------------------------------------- lower
-# the headers one by one (they carry meta syntax), then the program as a module
+# the headers one by one (they carry meta syntax), then the program as a
+# module, with the migrations compiled into it. These go under a path that
+# ends in migrations/<name>.c: meta-db-migrate names each one after its
+# __FILE__, as node db-migrate does.
 (cd src && "$META_ROOT/meta" -s -I . $INCS -emit-each "$WORK/addon-h" ./*.h)
-(cd src && "$META_ROOT/meta" -s -I . $INCS -module "$WORK/addon" main.c)
-cp "$WORK"/addon-h/*.h "$WORK/addon/"
 
-# the migrations, under a path that ends in migrations/<name>.c: meta-db-migrate
-# names each one after its __FILE__, as node db-migrate does
-mkdir -p "$WORK/addon/migrations"
-MIGRATIONS=""
+mkdir -p "$WORK/migrations"
+MODULE_SRCS=()
 for m in migrations/*.c; do
-  "$META_ROOT/meta" -s -I src $INCS -emit "$WORK/addon/migrations/$(basename "$m")" "$m"
-  MIGRATIONS="$MIGRATIONS \$ngx_addon_dir/migrations/$(basename "$m")"
+  "$META_ROOT/meta" -s -I src $INCS -emit "$WORK/migrations/$(basename "$m")" "$m"
+  MODULE_SRCS+=(-module-src "$WORK/migrations/$(basename "$m")")
 done
 
-# The config meta writes compiles the runtime from its sources; the image has
-# none, it has the runtime as an archive. Only the module itself is compiled
-# here, and the archive is linked.
-sed -i \
-  -e "s|^\\( *ngx_module_srcs=\\).*|\\1\"\\\$ngx_addon_dir/ngx_http_meta_module.c$MIGRATIONS\"|" \
-  -e "s|^\\( *ngx_module_libs=\"\\).*|\\1-Wl,--whole-archive $DBM/lib/libdbmigrate-cockroachdb.a $DBM/lib/libdbmigrate-core.a -Wl,--no-whole-archive $META_ROOT/lib/libmeta_runtime.a $STATIC_LIBS -lpthread -ldl -lm\"|" \
-  "$WORK/addon/config"
-grep -q 'libdbmigrate-core.a' "$WORK/addon/config" || { echo "addon config not as expected" >&2; exit 1; }
+# the link line after meta's own (-lpq -lcurl and the runtime archive):
+# db-migrate whole, since its driver registers itself from a constructor
+# that nothing names; the runtime once more behind it, which db-migrate's
+# core uses; then every library as an archive
+RUNTIME=$("$META_ROOT/meta" -print-config | sed -n 's/^runtime-archive=//p')
+(cd src && "$META_ROOT/meta" -s -I . $INCS "${MODULE_SRCS[@]}" \
+  -module-lib "-Wl,--whole-archive $DBM/lib/libdbmigrate-cockroachdb.a $DBM/lib/libdbmigrate-core.a -Wl,--no-whole-archive" \
+  -module-lib "$RUNTIME $STATIC_LIBS -lpthread -ldl -lm" \
+  -module "$WORK/addon" main.c)
+cp "$WORK"/addon-h/*.h "$WORK/addon/"
 
 # ---------------------------------------------------------------- nginx
 tarball=$OUT/nginx-$NGINX_VERSION.tar.gz
@@ -111,8 +115,8 @@ cp -r deploy doc README.md "$STAGE/"
     section "$name $version"
     cat "$DEPS/licenses/$name"
   done < "$DEPS/SOURCES"
-  section "yyjson $(sed -n 's/^#define YYJSON_VERSION_STRING "\(.*\)"/\1/p' "$META_ROOT/runtime/vendor/yyjson/yyjson.h") (MIT), vendored in the meta runtime"
-  sed -n '2,20p' "$META_ROOT/runtime/vendor/yyjson/yyjson.h"
+  section "yyjson $(sed -n 's/^#define YYJSON_VERSION_STRING "\(.*\)"/\1/p' "$YYJSON_H") (MIT), vendored in the meta runtime"
+  sed -n '2,20p' "$YYJSON_H"
   section "meta-db-migrate $DBM_VERSION (MIT), linked statically with the migrations"
   cat "$DBM/share/doc/meta-db-migrate/LICENSE"
   section "glibc (LGPL-2.1-or-later)"
@@ -123,7 +127,7 @@ cp -r deploy doc README.md "$STAGE/"
   echo "wx1-keyagent $VERSION"
   echo "commit $(git rev-parse HEAD 2>/dev/null || echo unknown)"
   echo "nginx $NGINX_VERSION"
-  echo "meta ${META_REF:-unknown}"
+  echo "meta $("$META_ROOT/meta" --version | cut -d" " -f2) (${META_REF:-image unknown})"
   while read -r name version url sum; do echo "$name $version"; done < "$DEPS/SOURCES"
   echo "meta-db-migrate $DBM_VERSION"
   echo "migrations $(ls migrations | tr '\n' ' ')"

@@ -13,7 +13,7 @@
 #       packages its libraries were copied from. The base is named with its
 #       digest; it carries a signed SBOM of its own.
 #
-# Needs jq. Reads DEPS (ci/deps.sh prefix), META_ROOT, META_REF, NGINX_VERSION,
+# Needs jq. Reads DEPS (ci/deps.sh prefix), META_ROOT, META_REF, YYJSON_H, NGINX_VERSION,
 # NGINX_SHA256, NGINX_URL and DBM_VERSION, DBM_URL, DBM_SHA256 from the environment.
 set -euo pipefail
 
@@ -67,13 +67,13 @@ release)
 
   comps+=("$(component meta-db-migrate "$DBM_VERSION" "$DBM_URL" "$DBM_SHA256" MIT "libdbmigrate-core and its cockroachdb/pg driver, linked statically with the migrations from migrations/")")
 
-  yyjson=$(sed -n 's/^#define YYJSON_VERSION_STRING "\(.*\)"/\1/p' "$META_ROOT/runtime/vendor/yyjson/yyjson.h")
+  yyjson=$(sed -n 's/^#define YYJSON_VERSION_STRING "\(.*\)"/\1/p' "$YYJSON_H")
   comps+=("$(component yyjson "$yyjson" "" "" MIT "vendored in the meta runtime, linked statically")")
 
   # the meta runtime: the program is written in meta and links its runtime
-  comps+=("$(jq -n --arg ref "${META_REF:-unknown}" '
+  comps+=("$(jq -n --arg commit "$("$META_ROOT/meta" --version | cut -d' ' -f2)" --arg ref "${META_REF:-unknown}" '
     {type: "library", "bom-ref": "pkg:generic/meta-runtime", name: "meta-runtime",
-     version: $ref, licenses: [{license: {name: "proprietary (wx-one)"}}], scope: "required",
+     version: $commit, properties: [{name: "meta:image", value: $ref}], licenses: [{license: {name: "proprietary (wx-one)"}}], scope: "required",
      description: "runtime of the meta compiler (libmeta_runtime.a and its headers), linked statically",
      externalReferences: [{type: "distribution", url: ("https://hub.docker.com/r/wxone/meta")}]}')")
 
