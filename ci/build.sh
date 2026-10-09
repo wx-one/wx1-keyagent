@@ -66,7 +66,7 @@ for m in migrations/*.c; do
   MODULE_SRCS+=(-module-src "$WORK/migrations/$(basename "$m")")
 done
 
-# added to the link line, before the runtime archive meta puts last:
+# added to the link line (meta groups it with its runtime, so the order no longer decides):
 # db-migrate whole, since its driver registers itself from a constructor
 # that nothing names; then every library as an archive
 (cd src && "$META_ROOT/meta" -s -I . $INCS "${MODULE_SRCS[@]}" \
