@@ -51,6 +51,7 @@ ENV META_HTTP_MODULE=/opt/wx1-keyagent/modules/ngx_http_meta_module.so \
 LABEL org.opencontainers.image.title="wx1-keyagent" \
       org.opencontainers.image.description="The customer's key release for confidential VMs" \
       org.opencontainers.image.source="https://github.com/wx-one/wx1-keyagent" \
+      org.opencontainers.image.licenses="EUPL-1.2" \
       org.opencontainers.image.base.name="registry.opencode.de/oci-community/images/auswaertiges-amt/debian:13.7"
 
 USER 65534:65534

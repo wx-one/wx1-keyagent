@@ -110,7 +110,7 @@ cp "$WORK/nginx-$NGINX_VERSION/objs/ngx_http_meta_module.so" "$STAGE/modules/"
 cp ci/wx1-keyagent ci/wx1-keyagent.service "$STAGE/bin/" 2>/dev/null || true
 mv "$STAGE/bin/wx1-keyagent.service" "$STAGE/" 2>/dev/null || true
 chmod +x "$STAGE/bin/wx1-keyagent"
-cp -r deploy doc README.md "$STAGE/"
+cp -r deploy doc README.md LICENSE "$STAGE/"
 # the licence of everything inside, as the licences ask: nginx, the libraries
 # from their sources, yyjson from the header the meta runtime vendors
 {

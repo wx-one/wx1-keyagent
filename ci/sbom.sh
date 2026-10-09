@@ -98,7 +98,7 @@ release)
   done
 
   app=$(jq -n --arg v "$version" --arg c "$(git rev-parse HEAD 2>/dev/null || echo unknown)" \
-             --arg l "${WX_LICENSE:-NOASSERTION}" '
+             --arg l "${WX_LICENSE:-EUPL-1.2}" '
     {type: "application", "bom-ref": ("pkg:github/wx-one/wx1-keyagent@" + $v), name: "wx1-keyagent",
      version: $v, purl: ("pkg:github/wx-one/wx1-keyagent@" + $v),
      licenses: [ (if $l == "NOASSERTION" then {license: {name: "NOASSERTION"}} else {license: {id: $l}} end) ],
