@@ -218,7 +218,7 @@ static const char *pushPolicy(void) {
   text_t auth = TEXT`Bearer ${token}`;
   auth.into(bearer, sizeof bearer);
 
-  fetch_answer_t got = meta_fetch("POST", url).header("authorization", bearer).json(body.at).send();
+  fetch_answer_t got = freshCall("POST", url).header("authorization", bearer).json(body.at).send();
 
   if (!got.ok)
     wrong = got.status == 0 ? "KBS not reachable" : "KBS refused the policy";

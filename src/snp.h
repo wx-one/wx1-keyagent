@@ -116,7 +116,7 @@ static buf_t snpFetch(const char *cached, const char *url) {
     return got;
   }
 
-  fetch_answer_t answer = meta_get(url);
+  fetch_answer_t answer = freshCall("GET", url).send();
 
   if (answer.ok && answer.body != NULL && answer.length > 0) {
     buf_t__add(&got, answer.body, answer.length);

@@ -67,7 +67,7 @@ jobs:
           echo "RELEASE=$release" >>"$GITHUB_ENV"
           docker build -q -f ci/Dockerfile.release --build-arg RELEASE="$release" -t wx1-keyagent:ci out
       - name: test/api.sh against the image
-        run: IMAGE=wx1-keyagent:ci NO_BUILD=1 test/local.sh
+        run: RACE_ROUNDS=20 IMAGE=wx1-keyagent:ci NO_BUILD=1 test/local.sh
       - name: image SBOM
         run: |
           sudo apt-get install -y -qq jq >/dev/null

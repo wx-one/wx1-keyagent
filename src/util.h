@@ -14,6 +14,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include <meta_fetch.h>
+
 /**
  * The settings, kept from the master.
  *
@@ -208,6 +210,28 @@ static void buf_t__html(buf_t *self, const char *text) {
     case '\'': buf_t__put(self, "&#39;"); break;
     default: buf_t__add(self, at, 1);
     }
+}
+
+/* ------------------------------------------------------------- outgoing */
+
+/**
+ * Every outgoing call on a connection of its own, closed afterwards.
+ *
+ * meta_fetch shares libcurl's connection cache between all transfers of a
+ * worker, and a worker runs requests side by side. Two of them reusing one
+ * keep-alive connection to OpenBao got each other's answers: one request read
+ * another key's entry as its disk, or no SSH keys in the settings (test/api.sh
+ * "races", RACE_ROUNDS=40: 5 of 40 rounds, none of 120 with this). Until meta
+ * keeps its transfers apart, none of ours takes or leaves a connection there.
+ */
+static fetch_call_t freshCall(const char *method, const char *url) {
+
+  fetch_call_t call = meta_fetch(method, url);
+
+  curl_easy_setopt(call.easy, CURLOPT_FRESH_CONNECT, 1L);
+  curl_easy_setopt(call.easy, CURLOPT_FORBID_REUSE, 1L);
+
+  return call;
 }
 
 /* ------------------------------------------------------------ identifiers */

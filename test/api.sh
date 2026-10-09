@@ -175,13 +175,23 @@ expect "a data volume is not the main disk" "$(echo "$R" | st)" "rejected.*main 
 expect "  and nothing else is wrong with it" "$(echo "$R" | st)" "^rejected checks failed: it is the VM's main disk$"
 
 echo "--- races"
-V2=vol-$(uuid)
-req create_volume "{\"disk_id\":\"$V2\"}" >/dev/null
-req attach "$(DISK=$V2 payload "$VM" "$W/ud-safe")" > "$W/r1" &
-req attach "$(DISK=$V2 payload "$VM" "$W/ud-safe")" > "$W/r2" &
-wait
-expect "two attaches at once: one wins" "$(st < "$W/r1"; st < "$W/r2")" "applied"
-expect "  the other is rejected" "$(st < "$W/r1"; st < "$W/r2")" "rejected"
+# RACE_ROUNDS=<n> runs it n times; a round that goes wrong says everything it saw
+for round in $(seq "${RACE_ROUNDS:-1}"); do
+  V2=vol-$(uuid)
+  made=$(req create_volume "{\"disk_id\":\"$V2\"}")
+  req attach "$(DISK=$V2 payload "$VM" "$W/ud-safe")" > "$W/r1" &
+  req attach "$(DISK=$V2 payload "$VM" "$W/ud-safe")" > "$W/r2" &
+  wait
+  both="$(st < "$W/r1"; st < "$W/r2")"
+  if [[ ! "$both" =~ applied || ! "$both" =~ rejected ]]; then
+    echo "     round $round, $V2: create_volume answered $made"
+    echo "     r1: $(cat "$W/r1")"
+    echo "     r2: $(cat "$W/r2")"
+    sql "select id, type, status, decided_by, reason, checks::TEXT from requests where payload->>'disk_id' = '$V2' order by id" | sed 's/^/     /'
+  fi
+  expect "two attaches at once: one wins" "$both" "applied"
+  expect "  the other is rejected" "$both" "rejected"
+done
 
 echo "--- the VM goes"
 expect "detach by vm_uuid" "$(req detach "{\"vm_uuid\":\"$VM\"}" | st)" "^applied"
