@@ -66,15 +66,12 @@ for m in migrations/*.c; do
   MODULE_SRCS+=(-module-src "$WORK/migrations/$(basename "$m")")
 done
 
-# added to the link line: db-migrate whole, since its driver registers
-# itself from a constructor that nothing names; the runtime archive, which
-# db-migrate's core uses too; then every library as an archive.
-# meta puts it last itself from 749b6f9 on, but that build dropped it;
-# twice does no harm, and the check after make sees either way
-RUNTIME=$("$META_ROOT/meta" -print-config | sed -n 's/^runtime-archive=//p')
+# added to the link line, before the runtime archive meta puts last:
+# db-migrate whole, since its driver registers itself from a constructor
+# that nothing names; then every library as an archive
 (cd src && "$META_ROOT/meta" -s -I . $INCS "${MODULE_SRCS[@]}" \
   -module-lib "-Wl,--whole-archive $DBM/lib/libdbmigrate-cockroachdb.a $DBM/lib/libdbmigrate-core.a -Wl,--no-whole-archive" \
-  -module-lib "$RUNTIME $STATIC_LIBS -lpthread -ldl -lm" \
+  -module-lib "$STATIC_LIBS -lpthread -ldl -lm" \
   -module "$WORK/addon" main.c)
 cp "$WORK"/addon-h/*.h "$WORK/addon/"
 
