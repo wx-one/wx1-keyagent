@@ -88,25 +88,29 @@ tar -xzf "$tarball" -C "$WORK"
 (
   cd "$WORK/nginx-$NGINX_VERSION"
   # the prefix the release unpacks to; every path is also given at start
-  ./configure --prefix=/opt/wx1-keyagent --with-compat --with-http_ssl_module \
+  # the agent built into nginx (--add-module): one binary, one OpenSSL, no
+  # load_module - meta's addon config defines META_HTTP_BUILTIN for this
+  ./configure --prefix=/opt/wx1-keyagent --with-http_ssl_module \
     --with-cc-opt="-O2 -fstack-protector-strong -Wno-error -I$WORK/addon $INCS" \
     --with-ld-opt="-L$L" \
     --without-http_rewrite_module --without-http_gzip_module --without-http_auth_basic_module \
-    --add-dynamic-module="$WORK/addon" >"$WORK/configure.log" 2>&1 \
+    --add-module="$WORK/addon" >"$WORK/configure.log" 2>&1 \
     || { tail -20 "$WORK/configure.log" >&2; exit 1; }
   make -j"$(nproc)" >"$WORK/make.log" 2>&1 || { grep -E "error:|undefined reference|relocation" "$WORK/make.log" | grep -v Werror | head -20 >&2; exit 1; }
 )
 
-# A module may leave open only what nginx and glibc provide when it is
-# loaded; anything else would fail at dlopen, not here
-open=$(nm -D --undefined-only "$WORK/nginx-$NGINX_VERSION/objs/ngx_http_meta_module.so" \
-  | awk '{print $2}' | grep -v -E '@GLIBC_|^ngx_|^__gmon_start__$|^_ITM_|^__cxa_finalize' || true)
-[ -z "$open" ] || { echo "the module leaves open:" >&2; echo "$open" | head -20 >&2; exit 1; }
+# The binary may leave open only what glibc provides; anything else would
+# be a library that is not linked in
+open=$(nm -D --undefined-only "$WORK/nginx-$NGINX_VERSION/objs/nginx" \
+  | awk '{print $2}' | grep -v -E '@GLIBC_|^__gmon_start__$|^_ITM_|^__cxa_finalize' || true)
+[ -z "$open" ] || { echo "the binary leaves open:" >&2; echo "$open" | head -20 >&2; exit 1; }
+# and it is the agent: the module is in it, not loaded
+grep -q ngx_http_meta_module "$WORK/nginx-$NGINX_VERSION/objs/ngx_modules.c" \
+  || { echo "the agent is not built into nginx" >&2; exit 1; }
 
 # ---------------------------------------------------------------- pack
-mkdir -p "$STAGE/sbin" "$STAGE/modules" "$STAGE/bin"
+mkdir -p "$STAGE/sbin" "$STAGE/bin"
 cp "$WORK/nginx-$NGINX_VERSION/objs/nginx" "$STAGE/sbin/nginx"
-cp "$WORK/nginx-$NGINX_VERSION/objs/ngx_http_meta_module.so" "$STAGE/modules/"
 cp ci/wx1-keyagent ci/wx1-keyagent.service "$STAGE/bin/" 2>/dev/null || true
 mv "$STAGE/bin/wx1-keyagent.service" "$STAGE/" 2>/dev/null || true
 chmod +x "$STAGE/bin/wx1-keyagent"

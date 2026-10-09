@@ -44,8 +44,8 @@ prüft die Berichte selbst gegen AMDs Zertifikatskette.
 
 Es gibt die Release als Tarball und als Image.
 
-**Tarball** (`wx1-keyagent-<version>-linux-x86_64.tar.gz`): nginx mit dem Modul des
-wx1-keyagent, ein Startskript, eine systemd-Unit, die OpenBao-Policy, diese Doku, das SBOM
+**Tarball** (`wx1-keyagent-<version>-linux-x86_64.tar.gz`): ein einziges Binary
+(`sbin/nginx`, nginx mit dem eingebauten wx1-keyagent), ein Startskript, eine systemd-Unit, die OpenBao-Policy, diese Doku, das SBOM
 (CycloneDX, `SBOM.cdx.json`) und die Lizenzen der enthaltenen Software
 (`THIRD_PARTY_NOTICES`). Alles außer glibc ist statisch gelinkt; vom System braucht er nur
 **glibc ab 2.38** (Ubuntu 24.04, Debian 13, RHEL 10, Fedora 39 und neuer). Namen werden wie

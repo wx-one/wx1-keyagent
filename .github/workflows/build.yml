@@ -113,7 +113,7 @@ jobs:
           image=$(cat out/*.image-digest)
           {
             echo "## Binary"
-            echo "\`wx1-keyagent-*-linux-x86_64.tar.gz\`: nginx with the agent's module, everything but glibc (>= 2.38) linked statically. SHA-256 in the \`.sha256\` file, SBOM (CycloneDX 1.6) in \`.cdx.json\`, licences in \`THIRD_PARTY_NOTICES\` inside the tarball."
+            echo "\`wx1-keyagent-*-linux-x86_64.tar.gz\`: one binary, nginx with the agent built in, everything but glibc (>= 2.38) linked statically. SHA-256 in the \`.sha256\` file, SBOM (CycloneDX 1.6) in \`.cdx.json\`, licences in \`THIRD_PARTY_NOTICES\` inside the tarball."
             echo
             echo "## Image"
             echo "\`$image\` - on the hardened Debian 13 runtime seed of container.gov.de. What it adds to the seed: \`.image.cdx.json\`."

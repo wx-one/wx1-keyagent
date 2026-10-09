@@ -18,9 +18,7 @@ RUN set -eu; \
     cp -a /stage/${RELEASE}/. "$app/"; \
     # every library ldd proves, from this Debian release - and libgcc_s, which
     # glibc loads itself when a thread ends with pthread_exit
-    for f in "$app/sbin/nginx" "$app/modules/ngx_http_meta_module.so"; do \
-      ldd "$f" | awk '/=>/ {print $3} /^\t\// {print $1}'; \
-    done | sort -u > /libs; \
+    ldd "$app/sbin/nginx" | awk '/=>/ {print $3} /^\t\// {print $1}' | sort -u > /libs; \
     echo /lib/x86_64-linux-gnu/libgcc_s.so.1 >> /libs; \
     for l in $(cat /libs); do \
       mkdir -p "/rootfs$(dirname "$l")"; cp -L "$l" "/rootfs$l"; \
@@ -29,13 +27,12 @@ RUN set -eu; \
     for l in $(cat /libs); do dpkg -S "$(readlink -f "$l")" 2>/dev/null || dpkg -S "$l"; done \
       | cut -d: -f1 | sort -u | xargs dpkg-query -W -f '${Package} ${Version} ${source:Package} ${source:Version}\n' \
       > "$app/BASE-LIBS"; \
-    # nginx's working directory: the module writes the real configuration into
+    # nginx's working directory: the agent writes the real configuration into
     # the file nginx was started with, so it has to be writable
     state=/rootfs/var/lib/wx1-keyagent; \
     mkdir -p "$state/conf" "$state/logs" "$state/kds"; \
     printf '%s\n' \
-      '# Written into the image, replaced by the module a moment after start.' \
-      'load_module /opt/wx1-keyagent/modules/ngx_http_meta_module.so;' \
+      '# Written into the image, replaced by the agent a moment after start.' \
       'daemon off;' 'error_log stderr info;' 'pid logs/meta.pid;' \
       'events { worker_connections 64; }' 'http { }' > "$state/conf/nginx.conf"; \
     chown -R 65534:65534 "$state"; \
@@ -44,8 +41,7 @@ RUN set -eu; \
 FROM ${SEED}
 COPY --from=assemble /rootfs/ /
 
-ENV META_HTTP_MODULE=/opt/wx1-keyagent/modules/ngx_http_meta_module.so \
-    SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt \
+ENV SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt \
     WX_KDS=/var/lib/wx1-keyagent/kds
 
 LABEL org.opencontainers.image.title="wx1-keyagent" \

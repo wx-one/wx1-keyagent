@@ -63,7 +63,7 @@ release)
     comps+=("$(component "$name" "$version_" "$url" "$sum" "$(licence_of "$name")" "built from source by ci/deps.sh, linked statically")")
   done < "$DEPS/SOURCES"
 
-  comps+=("$(component nginx "$NGINX_VERSION" "$NGINX_URL" "$NGINX_SHA256" BSD-2-Clause "built from source; carries the agent as a module")")
+  comps+=("$(component nginx "$NGINX_VERSION" "$NGINX_URL" "$NGINX_SHA256" BSD-2-Clause "built from source, with the agent built in")")
 
   comps+=("$(component meta-db-migrate "$DBM_VERSION" "$DBM_URL" "$DBM_SHA256" MIT "libdbmigrate-core and its cockroachdb/pg driver, linked statically with the migrations from migrations/")")
 
@@ -92,7 +92,7 @@ release)
      description: "provided by the host, linked dynamically (libc, libm, ld-linux); not part of the release"}')")
 
   # the files shipped, by their hashes
-  for f in sbin/nginx modules/ngx_http_meta_module.so bin/wx1-keyagent; do
+  for f in sbin/nginx bin/wx1-keyagent; do
     comps+=("$(jq -n --arg f "$f" --arg h "$(sha256sum "$stage/$f" | cut -d' ' -f1)" '
       {type: "file", "bom-ref": ("file:" + $f), name: $f, hashes: [{alg: "SHA-256", content: $h}]}')")
   done
