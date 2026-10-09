@@ -48,6 +48,8 @@ export META_ROOT
 rm -rf "$WORK" && mkdir -p "$WORK/addon-h" "$STAGE"
 
 INCS="-I$DEPS/include -I$DBM/include"
+# the version the UI shows; meta resolves macros as it lowers
+VERSION_DEF="WX_VERSION=\"$VERSION\""
 L=$DEPS/lib
 # the module's libraries, as archives: nothing for the dynamic linker to find
 STATIC_LIBS="$L/libpq.a $L/libpgcommon_shlib.a $L/libpgport_shlib.a $L/libcurl.a $L/libyaml.a $L/libssl.a $L/libcrypto.a $L/libz.a"
@@ -57,10 +59,12 @@ STATIC_LIBS="$L/libpq.a $L/libpgcommon_shlib.a $L/libpgport_shlib.a $L/libcurl.a
 # module, with the migrations compiled into it. These go under a path that
 # ends in migrations/<name>.c: meta-db-migrate names each one after its
 # __FILE__, as node db-migrate does.
-(cd src && "$META_ROOT/meta" -s -I . $INCS -emit-each "$WORK/addon-h" ./*.h)
+(cd src && "$META_ROOT/meta" -s -D "$VERSION_DEF" -I . $INCS -emit-each "$WORK/addon-h" ./*.h)
+
+# the fonts of the UI: plain C, compiled as it is (written by ci/assets.sh)
+MODULE_SRCS=(-module-src "$PWD/src/assets.c")
 
 mkdir -p "$WORK/migrations"
-MODULE_SRCS=()
 for m in migrations/*.c; do
   "$META_ROOT/meta" -s -I src $INCS -emit "$WORK/migrations/$(basename "$m")" "$m"
   MODULE_SRCS+=(-module-src "$WORK/migrations/$(basename "$m")")
@@ -69,7 +73,7 @@ done
 # added to the link line (meta groups it with its runtime, so the order no longer decides):
 # db-migrate whole, since its driver registers itself from a constructor
 # that nothing names; then every library as an archive
-(cd src && "$META_ROOT/meta" -s -I . $INCS "${MODULE_SRCS[@]}" \
+(cd src && "$META_ROOT/meta" -s -D "$VERSION_DEF" -I . $INCS "${MODULE_SRCS[@]}" \
   -module-lib "-Wl,--whole-archive $DBM/lib/libdbmigrate-cockroachdb.a $DBM/lib/libdbmigrate-core.a -Wl,--no-whole-archive" \
   -module-lib "$STATIC_LIBS -lpthread -ldl -lm" \
   -module "$WORK/addon" main.c)
@@ -123,6 +127,8 @@ cp -r deploy doc README.md "$STAGE/"
   sed -n '2,20p' "$YYJSON_H"
   section "meta-db-migrate $DBM_VERSION (MIT), linked statically with the migrations"
   cat "$DBM/share/doc/meta-db-migrate/LICENSE"
+  section "Barlow (OFL-1.1), the typeface of the UI, embedded from assets/"
+  cat assets/barlow-OFL.txt
   section "glibc (LGPL-2.1-or-later)"
   echo "Not included: linked dynamically and provided by the host system."
 } > "$STAGE/THIRD_PARTY_NOTICES"

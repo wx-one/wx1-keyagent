@@ -70,6 +70,15 @@ release)
   yyjson=$(sed -n 's/^#define YYJSON_VERSION_STRING "\(.*\)"/\1/p' "$YYJSON_H")
   comps+=("$(component yyjson "$yyjson" "" "" MIT "vendored in the meta runtime, linked statically")")
 
+  # the typeface of the UI, embedded (src/assets.h, written by ci/assets.sh)
+  for f in assets/*.woff2; do
+    comps+=("$(jq -n --arg n "$(basename "$f")" --arg h "$(sha256sum "$f" | cut -d' ' -f1)" '
+      {type: "file", "bom-ref": ("font:" + $n), name: $n, group: "Barlow", version: "5.2.5 (fontsource)",
+       licenses: [{license: {id: "OFL-1.1"}}], hashes: [{alg: "SHA-256", content: $h}],
+       description: "typeface of the UI, embedded in the module",
+       externalReferences: [{type: "distribution", url: "https://www.npmjs.com/package/@fontsource/barlow"}]}')")
+  done
+
   # the meta runtime: the program is written in meta and links its runtime
   comps+=("$(jq -n --arg commit "$("$META_ROOT/meta" --version | cut -d' ' -f2)" --arg ref "${META_REF:-unknown}" '
     {type: "library", "bom-ref": "pkg:generic/meta-runtime", name: "meta-runtime",
