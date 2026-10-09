@@ -89,7 +89,7 @@ static http_response_t health(http_request_t *req) {
   text_t at = TEXT`${baoUrl}/v1/sys/health`;
   at.into(where, sizeof where);
 
-  fetch_answer_t bao = freshCall("GET", where).send();
+  fetch_answer_t bao = meta_get(where);
   int baoStatus = bao.status;
   bao.release();
 

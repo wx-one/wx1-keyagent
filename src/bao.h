@@ -32,7 +32,7 @@ static fetch_answer_t baoCall(const char *method, const char *path, const char *
 
   at.into(url, sizeof url);
 
-  fetch_call_t call = freshCall(method, url).header("x-vault-token", baoToken);
+  fetch_call_t call = meta_fetch(method, url).header("x-vault-token", baoToken);
 
   if (body != NULL)
     call = call.json(body);
