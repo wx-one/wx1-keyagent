@@ -16,10 +16,13 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
+      # meta by tag and digest, in one place: ci/meta-image (build.sh reads it too)
+      - id: pin
+        run: echo "image=$(cat ci/meta-image)" >>"$GITHUB_OUTPUT"
       - uses: ./.github/actions/meta
         id: meta
         with:
-          image: ${{ vars.META_IMAGE || 'wxone/meta:latest' }}
+          image: ${{ steps.pin.outputs.image }}
       - name: build tools
         run: |
           sudo apt-get update -qq
@@ -34,7 +37,7 @@ jobs:
         run: |
           version=${GITHUB_REF_NAME#v}
           [[ "$GITHUB_REF" == refs/tags/v* ]] || version=0.0.0-${GITHUB_SHA::12}
-          export META_REF=$(docker image inspect --format '{{index .RepoDigests 0}}' "${{ vars.META_IMAGE || 'wxone/meta:latest' }}")
+          export META_REF="${{ steps.pin.outputs.image }}"
           ci/build.sh "$version"
       - uses: actions/upload-artifact@v4
         with:

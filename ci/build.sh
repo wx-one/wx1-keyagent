@@ -66,10 +66,11 @@ for m in migrations/*.c; do
   MODULE_SRCS+=(-module-src "$WORK/migrations/$(basename "$m")")
 done
 
-# the link line after meta's own (-lpq -lcurl and the runtime archive):
-# db-migrate whole, since its driver registers itself from a constructor
-# that nothing names; the runtime once more behind it, which db-migrate's
-# core uses; then every library as an archive
+# added to the link line: db-migrate whole, since its driver registers
+# itself from a constructor that nothing names; the runtime archive, which
+# db-migrate's core uses too; then every library as an archive.
+# meta puts it last itself from 749b6f9 on, but that build dropped it;
+# twice does no harm, and the check after make sees either way
 RUNTIME=$("$META_ROOT/meta" -print-config | sed -n 's/^runtime-archive=//p')
 (cd src && "$META_ROOT/meta" -s -I . $INCS "${MODULE_SRCS[@]}" \
   -module-lib "-Wl,--whole-archive $DBM/lib/libdbmigrate-cockroachdb.a $DBM/lib/libdbmigrate-core.a -Wl,--no-whole-archive" \
@@ -94,6 +95,12 @@ tar -xzf "$tarball" -C "$WORK"
     || { tail -20 "$WORK/configure.log" >&2; exit 1; }
   make -j"$(nproc)" >"$WORK/make.log" 2>&1 || { grep -E "error:|undefined reference|relocation" "$WORK/make.log" | grep -v Werror | head -20 >&2; exit 1; }
 )
+
+# A module may leave open only what nginx and glibc provide when it is
+# loaded; anything else would fail at dlopen, not here
+open=$(nm -D --undefined-only "$WORK/nginx-$NGINX_VERSION/objs/ngx_http_meta_module.so" \
+  | awk '{print $2}' | grep -v -E '@GLIBC_|^ngx_|^__gmon_start__$|^_ITM_|^__cxa_finalize' || true)
+[ -z "$open" ] || { echo "the module leaves open:" >&2; echo "$open" | head -20 >&2; exit 1; }
 
 # ---------------------------------------------------------------- pack
 mkdir -p "$STAGE/sbin" "$STAGE/modules" "$STAGE/bin"
