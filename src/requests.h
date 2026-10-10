@@ -896,7 +896,7 @@ static long submit(const char *type, json_t p) {
   }
 
   char *checksJson = checks.json();
-  char *payload = yyjson_val_write(p.node, 0, NULL);
+  char *payload = p.owned();
   long id = -1;
 
   sql_t q = SQL`insert into requests (type, payload, status, reason, checks, decided, decided_by)
