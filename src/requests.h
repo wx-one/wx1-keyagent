@@ -471,7 +471,7 @@ static bool lostRace(const char *wrong) {
 /** A new entry, written only if there is none yet; `*taken` if there was. */
 static bool baoCreate(const char *key, json_t entry, bool *taken) {
 
-  char *json = jsonText(entry);
+  char *json = entry.owned();
   bool conflict = false;
   bool written = json != NULL && baoWrite(key, json, 0, &conflict);
 
@@ -684,7 +684,7 @@ static const char *deleteDisk(const char *diskId) {
 static void askToShred(const char *diskId, const char *vm, const char *vmName) {
 
   json_t p = {disk_id: diskId, vm_uuid: vm, vm_name: vmName};
-  char *payload = jsonText(p);
+  char *payload = p.owned();
   p.release();
 
   static const char note[] =

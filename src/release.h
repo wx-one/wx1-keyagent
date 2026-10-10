@@ -268,7 +268,7 @@ static const char *admit(const char *diskId, const char *reportId, const char *c
   const char *vmName = att.found ? att.payload().get("vm_name").text() : "";
   json_t p = {disk_id: diskId, report_id: reportId, chip_id: chipId, reason: reason, vm_uuid: vm,
               vm_name: vmName, pcrs: pcrSet};
-  char *payload = jsonText(p);
+  char *payload = p.owned();
   p.release();
   pcrSet.release();
   att.release();

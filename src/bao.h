@@ -117,14 +117,6 @@ static void bao_entry_t__release(bao_entry_t *self) {
 }
 
 /**
- * A document as JSON text, for a request body or an SQL parameter: meta's
- * literals build a json_t, and nothing in meta writes one out yet. Free it.
- */
-static char *jsonText(json_t value) {
-  return value.node != NULL ? yyjson_val_write(value.node, 0, NULL) : NULL;
-}
-
-/**
  * Writes `json` (an object) as the entry. `cas` is the version it must still
  * have: 0 for "must not exist yet", -1 for "whatever is there". Answers
  * whether it was written; false with `*conflict` set means someone else
