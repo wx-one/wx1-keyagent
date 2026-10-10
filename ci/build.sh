@@ -29,8 +29,8 @@ STAGE=$WORK/$NAME
 export YYJSON_H=$("$META_ROOT/meta" -print-config | sed -n 's/^vendored-yyjson=//p')
 
 # meta-db-migrate: the migrations are compiled in, the library linked in
-export DBM_VERSION=0.3.0
-export DBM_SHA256=639cc82b45b9fab45621c561ed87bb365d2f15714dc68b47640d89102017b925
+export DBM_VERSION=0.6.0
+export DBM_SHA256=de47ea4a4b208ffb08e363d1c5df794eca2af4fc63375f87ce51e04cae19c8f7
 export DBM_URL=https://github.com/db-migrate/meta-db-migrate/releases/download/v$DBM_VERSION/meta-db-migrate-v$DBM_VERSION-linux-x86_64-glibc2.39.tar.gz
 export DBM=$OUT/meta-db-migrate-$DBM_VERSION
 if [ ! -f "$DBM/lib/libdbmigrate-core.a" ]; then

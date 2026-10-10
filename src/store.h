@@ -51,7 +51,7 @@ static bool baoEdit(const char *key, bao_edit_t edit, void *with) {
     yyjson_mut_val *root = NULL;
 
     if (entry.found)
-      root = yyjson_val_mut_copy(doc, entry.payload().node);
+      root = yyjson_mut_val_mut_copy(doc, entry.payload().node);
 
     if (root == NULL || !yyjson_mut_is_obj(root))
       root = yyjson_mut_obj(doc);
@@ -82,21 +82,21 @@ static bool baoEdit(const char *key, bao_edit_t edit, void *with) {
 
 static bool baoMerge(yyjson_mut_doc *doc, yyjson_mut_val *root, void *with) {
 
-  yyjson_val *patch = ((json_t *)with)->node;
-  yyjson_val *key, *value;
-  yyjson_obj_iter it;
+  yyjson_mut_val *patch = ((json_t *)with)->node;
+  yyjson_mut_val *key, *value;
+  yyjson_mut_obj_iter it;
 
-  if (!yyjson_is_obj(patch))
+  if (!yyjson_mut_is_obj(patch))
     return false;
 
-  yyjson_obj_iter_init(patch, &it);
+  yyjson_mut_obj_iter_init(patch, &it);
 
-  while ((key = yyjson_obj_iter_next(&it)) != NULL) {
-    value = yyjson_obj_iter_get_val(key);
-    yyjson_mut_obj_remove_str(root, yyjson_get_str(key));
+  while ((key = yyjson_mut_obj_iter_next(&it)) != NULL) {
+    value = yyjson_mut_obj_iter_get_val(key);
+    yyjson_mut_obj_remove_str(root, yyjson_mut_get_str(key));
 
-    if (!yyjson_is_null(value))
-      yyjson_mut_obj_put(root, yyjson_val_mut_copy(doc, key), yyjson_val_mut_copy(doc, value));
+    if (!yyjson_mut_is_null(value))
+      yyjson_mut_obj_put(root, yyjson_mut_val_mut_copy(doc, key), yyjson_mut_val_mut_copy(doc, value));
   }
 
   return true;
