@@ -39,8 +39,7 @@
 
 /** What was checked: [[true|false|null, text], ...]; null is a remark. */
 typedef struct {
-  yyjson_mut_doc *doc;
-  yyjson_mut_val *list;
+  json_t list;
   buf_t failed;
   int failures;
 } checks_t;
@@ -49,25 +48,14 @@ static checks_t checksNew(void) {
 
   checks_t self = {0};
 
-  self.doc = yyjson_mut_doc_new(NULL);
-  self.list = yyjson_mut_arr(self.doc);
-  yyjson_mut_doc_set_root(self.doc, self.list);
+  self.list = meta_toJSON("[]");
 
   return self;
 }
 
-static void checks_t__add(checks_t *self, yyjson_mut_val *verdict, const char *text) {
-
-  yyjson_mut_val *item = yyjson_mut_arr(self->doc);
-
-  yyjson_mut_arr_append(item, verdict);
-  yyjson_mut_arr_append(item, yyjson_mut_strcpy(self->doc, text));
-  yyjson_mut_arr_append(self->list, item);
-}
-
 static bool checks_t__ok(checks_t *self, bool good, const char *text) {
 
-  self->add(yyjson_mut_bool(self->doc, good), text);
+  self->list.push([good, text]);
 
   if (!good) {
     if (self->failures++ > 0)
@@ -79,16 +67,16 @@ static bool checks_t__ok(checks_t *self, bool good, const char *text) {
 }
 
 static void checks_t__note(checks_t *self, const char *text) {
-  self->add(yyjson_mut_null(self->doc), text);
+  self->list.push([NULL, text]);
 }
 
 /** The list as JSON; the caller frees it. */
 static char *checks_t__json(checks_t *self) {
-  return yyjson_mut_write(self->doc, 0, NULL);
+  return self->list.owned();
 }
 
 static void checks_t__release(checks_t *self) {
-  yyjson_mut_doc_free(self->doc);
+  self->list.release();
   free(self->failed.at);
 }
 
@@ -526,23 +514,21 @@ static const char *attach(json_t p, const char *diskId, bool withVtpm) {
   return wrong;
 }
 
-static bool addChip(yyjson_mut_doc *doc, yyjson_mut_val *root, void *with) {
+static bool addChip(json_t entry, void *with) {
 
   const char *chip = (const char *)with;
-  yyjson_mut_val *chips = yyjson_mut_obj_get(root, "chip_ids");
-  yyjson_mut_val *c;
-  yyjson_mut_arr_iter it;
+  json_t chips = entry.chip_ids;
 
-  if (!yyjson_mut_is_arr(chips))
+  if (strcmp(chips.kind(), "array") != 0)
     return false;
 
-  yyjson_mut_arr_iter_init(chips, &it);
-
-  while ((c = yyjson_mut_arr_iter_next(&it)) != NULL)
-    if (yyjson_mut_equals_str(c, chip))
+  for (int i = 0; i < chips.count(); ++i)
+    if (strcmp(chips.at(i).text(), chip) == 0)
       return false;
 
-  return yyjson_mut_arr_add_strcpy(doc, chips, chip);
+  chips.push(chip);
+
+  return true;
 }
 
 /** A vTPM's state key overwritten in the KBS, its entry (EK, replay stand) gone. */

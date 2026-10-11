@@ -134,7 +134,8 @@ if [ "$KS" = openbao ]; then
 else
   echo "--- key store: PKCS#11 (SoftHSM2)"
   expect "the state key on the token" "$(p11 --list-objects --type secrkey | grep -c 'label: *wx1-state$')" "^1$"
-  expect "  never extractable" "$(p11 --list-objects --type secrkey | grep -A6 'label: *wx1-state$' | grep -c 'never extractable')" "^1$"
+  expect "  never extractable" "$(p11 --list-objects --type secrkey | grep -A2 'label: *wx1-state$' | grep -c 'never extractable')" "^1$"
+  expect "  only signs" "$(p11 --list-objects --type secrkey | grep -A1 'label: *wx1-state$' | sed -n 's/^ *Usage: *//p')" "^sign, verify$"
 fi
 
 echo "--- tokens"
@@ -164,6 +165,8 @@ expect "  with remarks" "$(sql "select checks::TEXT from requests where id = $(e
 expect "create" "$(req create "$(payload "$VM" "$W/ud-safe")" | st)" "^applied"
 expect "  disk entry" "$(field "disks/vm-$VM" kind) $(field "disks/vm-$VM" status)" "^system active$"
 expect "  key in the key store" "$(keyOf "vm-$VM")" "$KEYRE"
+[ "$KS" = pkcs11 ] && expect "  on the token for nothing but being wrapped" \
+  "$(p11 --list-objects --type secrkey | grep -A1 "label: *wx1-disk-vm-$VM\$" | sed -n 's/^ *Usage: *//p')" "^none$"
 HD=$(field "attachments/vm-$VM" host_data)
 expect "  vTPM state key, through the KBS" "$(vtpmKey "$HD")" "^[0-9a-f]{64}$"
 expect "  vTPM entry" "$(there "vtpm/$HD")" "^yes$"

@@ -264,23 +264,20 @@ static const char *admit(const char *diskId, const char *reportId, const char *c
                                          : TEXT`the disk asks for confirmation`;
   t.into(reason, sizeof reason);
 
-  /* PCR 4/8/9 under their numbers: a literal names its keys, so these as text
-     - hex only, nothing to escape */
-  char p4[65], p8[65], p9[65], chain[256];
+  /* PCR 4/8/9 under their numbers */
+  char p4[65], p8[65], p9[65];
   toHex(pcrs->value[4], 32, p4);
   toHex(pcrs->value[8], 32, p8);
   toHex(pcrs->value[9], 32, p9);
-  snprintf(chain, sizeof chain, "{\"4\":\"%s\",\"8\":\"%s\",\"9\":\"%s\"}", p4, p8, p9);
-  json_t pcrSet = meta_toJSON(chain);
 
   entry_t att = storeGet("attachments", diskId);
   const char *vm = att.found ? att.payload().get("vm_uuid").text() : "";
   const char *vmName = att.found ? att.payload().get("vm_name").text() : "";
-  json_t p = {disk_id: diskId, report_id: reportId, chip_id: chipId, reason: reason, vm_uuid: vm,
-              vm_name: vmName, pcrs: pcrSet};
+  json_t p = {disk_id: diskId, report_id: reportId, chip_id: chipId, reason: (const char *)reason,
+              vm_uuid: vm, vm_name: vmName,
+              pcrs: {"4": (const char *)p4, "8": (const char *)p8, "9": (const char *)p9}};
   char *payload = p.owned();
   p.release();
-  pcrSet.release();
   att.release();
 
   /* the one remark the customer sees: why it waits */
@@ -314,7 +311,7 @@ static const char *admit(const char *diskId, const char *reportId, const char *c
 
 /** What a call answers: JSON for the guest, or why not. */
 typedef struct {
-  buf_t json;
+  json_t answer; /* the guest's answer, an object */
   const char *wrong;
   int code;
   char why[200];
@@ -334,9 +331,13 @@ static void release_t__refuse(release_t *self, int code, const char *why) {
   self->wrong = self->why;
 }
 
-/** {"k": "v", ...} into the answer; values are hex or base64, never quoted text. */
-static void release_t__field(release_t *self, const char *key, const char *value) {
-  buf_t__printf(&self->json, "%s\"%s\":\"%s\"", self->json.length > 1 ? "," : "", key, value);
+/** What the log keeps beside a call: which chip, which instance. */
+static void release_t__context(release_t *self, const char *chipId, const char *reportId) {
+
+  json_t ctx = {chip_id: chipId, report_id: reportId};
+
+  ctx.into(self->ctx, sizeof self->ctx);
+  ctx.release();
 }
 
 /** 1. A nonce for one disk. */
@@ -374,10 +375,9 @@ static void challenge(release_t *out, json_t req) {
   if (!stored)
     return out.refuse(503, "database not reachable");
 
-  buf_t__put(&out->json, "{");
-  out.field("session", session);
-  out.field("nonce", nonceB64);
-  buf_t__put(&out->json, "}");
+  json_t answer = out->answer;
+  answer.session = (const char *)session;
+  answer.nonce = (const char *)nonceB64;
 }
 
 /** SHA-512(a || b) == want */
@@ -468,9 +468,7 @@ static void attestStep(release_t *out, json_t req, attestIn_t *in) {
                     measurements.at ?: "", &guest);
 
   if (wrong == NULL) {
-    /* hex only: nothing to escape */
-    snprintf(out->ctx, sizeof out->ctx, "{\"chip_id\":\"%s\",\"report_id\":\"%s\"}",
-             guest.chipId, guest.reportId);
+    out.context(guest.chipId, guest.reportId);
     wrong = snpVerify((const unsigned char *)in->svsm.at, (size_t)in->svsm.length,
                       measurements.at ?: "", &vtpm);
   }
@@ -619,10 +617,9 @@ static void attestStep(release_t *out, json_t req, attestIn_t *in) {
     return out.refuse(403, "session used or expired");
   }
 
-  buf_t__put(&out->json, "{");
-  out.field("credential", credB64);
-  out.field("quote_nonce", quoteHex);
-  buf_t__put(&out->json, "}");
+  json_t answer = out->answer;
+  answer.credential = credB64;
+  answer.quote_nonce = (const char *)quoteHex;
 
   free(credB64);
 }
@@ -696,8 +693,7 @@ static void releaseStep(release_t *out, json_t req, session_t *s, blob_t *parts)
 
   text_t d = TEXT`${s->disk}`;
   d.into(out->disk, sizeof out->disk);
-  snprintf(out->ctx, sizeof out->ctx, "{\"chip_id\":\"%s\",\"report_id\":\"%s\"}",
-           s->chipId, s->reportId);
+  out.context(s->chipId, s->reportId);
 
   /* an older client takes the key only as plain RSA-OAEP, which needs it in
      the clear here; it has to say it opens the wrapped form */
@@ -758,9 +754,10 @@ static void releaseStep(release_t *out, json_t req, session_t *s, blob_t *parts)
     toHex(pcrs.value[4], 32, p4);
     toHex(pcrs.value[8], 32, p8);
     toHex(pcrs.value[9], 32, p9);
-    snprintf(out->ctx, sizeof out->ctx,
-             "{\"chip_id\":\"%s\",\"report_id\":\"%s\",\"pcrs\":{\"4\":\"%s\",\"8\":\"%s\",\"9\":\"%s\"}}",
-             s->chipId, s->reportId, p4, p8, p9);
+    json_t ctx = {chip_id: (const char *)s->chipId, report_id: (const char *)s->reportId,
+                  pcrs: {"4": (const char *)p4, "8": (const char *)p8, "9": (const char *)p9}};
+    ctx.into(out->ctx, sizeof out->ctx);
+    ctx.release();
   }
 
   if (!pcrApproved(&pcrs))
@@ -831,10 +828,10 @@ static void releaseStep(release_t *out, json_t req, session_t *s, blob_t *parts)
     storeEndLease(s->disk, s->reportId);
     if (next > 0 && !storeReplayConfirm(s->hostData, nvName, nv, next))
       return out.refuse(503, "cannot confirm the replay stand (database)");
-    buf_t__put(&out->json, "{\"ended\":true");
+    json_t answer = out->answer;
+    answer.ended = true;
     if (next > 0)
-      buf_t__printf(&out->json, ",\"nv_next\":\"%s\"", nextB64);
-    buf_t__put(&out->json, "}");
+      answer.nv_next = (const char *)nextB64;
     return;
   }
 
@@ -853,14 +850,14 @@ static void releaseStep(release_t *out, json_t req, session_t *s, blob_t *parts)
     return out.refuse(503, "cannot confirm the replay stand (database)");
 
   long expires = (long)time(NULL) + leaseTtl();
+  json_t answer = out->answer;
 
-  if (s->renew) {
-    buf_t__printf(&out->json, "{\"lease_expires\":%ld", expires);
-    if (next > 0)
-      buf_t__printf(&out->json, ",\"nv_next\":\"%s\"", nextB64);
-    buf_t__put(&out->json, "}");
+  answer.lease_expires = expires;
+  if (next > 0)
+    answer.nv_next = (const char *)nextB64;
+
+  if (s->renew)
     return;
-  }
 
   char wrapped[1400];
 
@@ -869,11 +866,9 @@ static void releaseStep(release_t *out, json_t req, session_t *s, blob_t *parts)
   if (wrong != NULL)
     return out.refuse(strncmp(wrong, "guest key", 9) == 0 ? 403 : 503, wrong);
 
-  buf_t__printf(&out->json, "{\"key\":\"%s\",\"wrap\":\"%s\",\"oaep\":\"%s\",\"lease_expires\":%ld",
-                wrapped, wrapName, keyOaep(), expires);
-  if (next > 0)
-    buf_t__printf(&out->json, ",\"nv_next\":\"%s\"", nextB64);
-  buf_t__put(&out->json, "}");
+  answer["key"] = (const char *)wrapped;
+  answer.wrap = wrapName;
+  answer.oaep = keyOaep();
 }
 
 static void releaseKey(release_t *out, json_t req) {

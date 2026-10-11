@@ -181,13 +181,14 @@ static json_t stateList(const char *prefix, bool *failed) {
   return names;
 }
 
-typedef bool (*state_edit_t)(yyjson_mut_doc *doc, yyjson_mut_val *root, void *with);
+/** An edit: changes the entry it is given and answers whether to write it back. */
+typedef bool (*state_edit_t)(json_t entry, void *with);
 
 /**
- * Changes one entry: `edit` gets the current content as a mutable copy (an
- * empty object when there is none) and answers whether to write it back.
- * A conflict reads again and edits again, after a short random wait that
- * grows, so writers that collided do not collide again in step.
+ * Changes one entry: `edit` gets its content (an empty object when there is
+ * none) and answers whether to write it back. A conflict reads again and
+ * edits again, after a short random wait that grows, so writers that
+ * collided do not collide again in step.
  */
 static bool stateEdit(const char *key, state_edit_t edit, void *with) {
 
@@ -204,31 +205,21 @@ static bool stateEdit(const char *key, state_edit_t edit, void *with) {
     if (entry.failed)
       return false;
 
-    yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
-    yyjson_mut_val *root = NULL;
-
-    if (entry.found)
-      root = yyjson_mut_val_mut_copy(doc, entry.payload().node);
-
-    if (root == NULL || !yyjson_mut_is_obj(root))
-      root = yyjson_mut_obj(doc);
-
-    yyjson_mut_doc_set_root(doc, root);
-
     long version = entry.found ? entry.version : 0;
-    entry.release();
+    json_t content = entry.found ? entry.data : meta_toJSON("{}");
 
-    if (!edit(doc, root, with)) {
-      yyjson_mut_doc_free(doc);
+    /* the content is the edit's now, released once below */
+    entry.found = false;
+
+    char *json = edit(content, with) ? content.owned() : NULL;
+    content.release();
+
+    if (json == NULL)
       return false;
-    }
 
-    char *json = yyjson_mut_write(doc, 0, NULL);
     bool conflict = false;
-    bool written = json != NULL && stateWrite(key, json, version, &conflict);
-
+    bool written = stateWrite(key, json, version, &conflict);
     free(json);
-    yyjson_mut_doc_free(doc);
 
     if (written || !conflict)
       return written;
@@ -237,23 +228,20 @@ static bool stateEdit(const char *key, state_edit_t edit, void *with) {
   return false;
 }
 
-static bool stateMerge(yyjson_mut_doc *doc, yyjson_mut_val *root, void *with) {
+/** The top-level fields of the patch set in the entry; a null takes one out. */
+static bool stateMerge(json_t entry, void *with) {
 
-  yyjson_mut_val *patch = ((json_t *)with)->node;
-  yyjson_mut_val *key, *value;
-  yyjson_mut_obj_iter it;
+  json_t patch = *(json_t *)with;
 
-  if (!yyjson_mut_is_obj(patch))
-    return false;
+  for (int i = 0; i < patch.count(); ++i) {
 
-  yyjson_mut_obj_iter_init(patch, &it);
+    const char *key = patch.keyAt(i);
+    json_t value = patch.get(key);
 
-  while ((key = yyjson_mut_obj_iter_next(&it)) != NULL) {
-    value = yyjson_mut_obj_iter_get_val(key);
-    yyjson_mut_obj_remove_str(root, yyjson_mut_get_str(key));
-
-    if (!yyjson_mut_is_null(value))
-      yyjson_mut_obj_put(root, yyjson_mut_val_mut_copy(doc, key), yyjson_mut_val_mut_copy(doc, value));
+    if (value.isNothing())
+      entry.remove(key);
+    else
+      entry.set(key, value);
   }
 
   return true;
@@ -375,33 +363,23 @@ typedef struct {
   long next;
 } replay_step_t;
 
-static void statePutInt(yyjson_mut_doc *doc, yyjson_mut_val *root, const char *key, long value) {
-  yyjson_mut_obj_remove_str(root, key);
-  yyjson_mut_obj_put(root, yyjson_mut_str(doc, key), yyjson_mut_sint(doc, value));
-}
-
-static void statePutText(yyjson_mut_doc *doc, yyjson_mut_val *root, const char *key, const char *value) {
-  yyjson_mut_obj_remove_str(root, key);
-  yyjson_mut_obj_put(root, yyjson_mut_str(doc, key), yyjson_mut_strcpy(doc, value));
-}
-
-static bool replayStep(yyjson_mut_doc *doc, yyjson_mut_val *root, void *with) {
+static bool replayStep(json_t entry, void *with) {
 
   replay_step_t *step = (replay_step_t *)with;
-  yyjson_mut_val *confirmed = yyjson_mut_obj_get(root, "replay_confirmed");
+  json_t confirmed = entry.replay_confirmed;
 
   /* the entry is made with the binding; one that is not there is not made here */
-  if (yyjson_mut_obj_size(root) == 0)
+  if (entry.count() == 0)
     return false;
 
   /* someone confirmed a later stand since we checked */
-  if (confirmed != NULL && yyjson_mut_get_sint(confirmed) > step->seen)
+  if (!confirmed.isNothing() && confirmed.number() > step->seen)
     return false;
 
-  statePutText(doc, root, "replay_nv", step->nvName);
-  statePutInt(doc, root, "replay_confirmed", step->seen);
-  statePutInt(doc, root, "replay_issued", step->next);
-  statePutInt(doc, root, "replay_at", (long)time(NULL));
+  entry.replay_nv = step->nvName;
+  entry.replay_confirmed = step->seen;
+  entry.replay_issued = step->next;
+  entry.replay_at = (long)time(NULL);
 
   return true;
 }
@@ -462,16 +440,14 @@ static int storeEk(const char *hostData, char *ek, size_t room) {
   return 1;
 }
 
-static bool ekPin(yyjson_mut_doc *doc, yyjson_mut_val *root, void *with) {
-
-  yyjson_mut_val *ek = yyjson_mut_obj_get(root, "ek");
+static bool ekPin(json_t entry, void *with) {
 
   /* no entry: not made here. Already bound, to this one or another: nothing to do */
-  if (yyjson_mut_obj_size(root) == 0 || (ek != NULL && yyjson_mut_get_len(ek) > 0))
+  if (entry.count() == 0 || entry.ek.text()[0] != 0)
     return false;
 
-  statePutText(doc, root, "ek", (const char *)with);
-  statePutInt(doc, root, "ek_first", (long)time(NULL));
+  entry.ek = (const char *)with;
+  entry.ek_first = (long)time(NULL);
 
   return true;
 }

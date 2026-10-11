@@ -61,10 +61,32 @@ static fetch_answer_t transitCall(const char *method, const char *path, const ch
   return baoCall(method, at, body);
 }
 
-/** The status of a call whose answer is not needed. */
-static int transitDo(const char *method, const char *path, const char *body) {
+/** A call on the transit mount with a document as its body. */
+static fetch_answer_t transitWith(const char *method, const char *path, json_t body) {
 
-  fetch_answer_t got = transitCall(method, path, body);
+  char *text = body.owned();
+  fetch_answer_t got = transitCall(method, path, text ?: "{}");
+
+  free(text);
+
+  return got;
+}
+
+/** The status of a call whose answer is not needed. */
+static int transitDo(const char *method, const char *path) {
+
+  fetch_answer_t got = transitCall(method, path, NULL);
+  int status = got.status;
+
+  got.release();
+
+  return status;
+}
+
+/** The status of a POST whose answer is not needed. */
+static int transitPost(const char *path, json_t body) {
+
+  fetch_answer_t got = transitWith("POST", path, body);
   int status = got.status;
 
   got.release();
@@ -80,12 +102,12 @@ static bool transitDelete(const char *name) {
   text_t c = TEXT`keys/${name}/config`;
   c.into(path, sizeof path);
 
-  int status = transitDo("POST", path, "{\"deletion_allowed\":true}");
+  int status = transitPost(path, {deletion_allowed: true});
 
   if (status == 404 || status == 400) {
     text_t k = TEXT`keys/${name}`;
     k.into(path, sizeof path);
-    return transitDo("GET", path, NULL) == 404;
+    return transitDo("GET", path) == 404;
   }
 
   if (status / 100 != 2)
@@ -94,7 +116,7 @@ static bool transitDelete(const char *name) {
   text_t k = TEXT`keys/${name}`;
   k.into(path, sizeof path);
 
-  status = transitDo("DELETE", path, NULL);
+  status = transitDo("DELETE", path);
 
   return status / 100 == 2 || status == 404;
 }
@@ -112,10 +134,15 @@ static bool transitEnsure(void) {
   text_t m = TEXT`sys/mounts/${baoMount}`;
   m.into(path, sizeof path);
 
-  fetch_answer_t made = baoCall("POST", path, "{\"type\":\"transit\"}");
-  made.release();
+  json_t mount = {type: "transit"};
+  char *text = mount.owned();
+  mount.release();
 
-  return transitDo("POST", "keys/wx1-state", "{\"type\":\"aes256-gcm96\"}") / 100 == 2;
+  fetch_answer_t made = baoCall("POST", path, text);
+  made.release();
+  free(text);
+
+  return transitPost("keys/wx1-state", {type: "aes256-gcm96"}) / 100 == 2;
 }
 
 /** A disk's key name. */
@@ -137,7 +164,7 @@ static bool transitNew(const char *diskId) {
   text_t k = TEXT`keys/${name}`;
   k.into(path, sizeof path);
 
-  return transitDo("POST", path, "{\"type\":\"aes256-gcm96\",\"exportable\":true}") / 100 == 2;
+  return transitPost(path, {type: "aes256-gcm96", exportable: true}) / 100 == 2;
 }
 
 /** Brings `raw` (32 bytes) in as the key `name`: wrapped for transit's own wrapping key. */
@@ -171,16 +198,13 @@ static bool transitImportAs(const char *name, const unsigned char *raw, size_t l
 
     if (b64 != NULL) {
       toBase64(wrapped, (size_t)n, b64);
-      json_t body = {ciphertext: b64, type: "aes256-gcm96", hash_function: "SHA256", exportable: true};
-      char *text = body.owned();
-      body.release();
 
       text_t k = TEXT`keys/${name}/import`;
       k.into(path, sizeof path);
 
-      done = text != NULL && transitDo("POST", path, text) / 100 == 2;
+      done = transitPost(path, {ciphertext: b64, type: "aes256-gcm96", hash_function: "SHA256",
+                                exportable: true}) / 100 == 2;
 
-      free(text);
       free(b64);
     }
   }
@@ -228,16 +252,11 @@ static const char *transitWrapNamed(const char *name, EVP_PKEY *guest, char *out
   char typeText[16];
   type.into(typeText, sizeof typeText);
 
-  json_t body = {public_key: pem, type: typeText};
-  char *text = body.owned();
-  body.release();
-  free(pem);
-
   text_t i = TEXT`keys/${guestName}/import`;
   i.into(path, sizeof path);
 
-  int status = text != NULL ? transitDo("POST", path, text) : 0;
-  free(text);
+  int status = transitPost(path, {public_key: pem, type: (const char *)typeText});
+  free(pem);
 
   if (status / 100 != 2)
     return "key store refused the guest key (OpenBao)";
@@ -300,14 +319,8 @@ static bool transitMac(const char *message, size_t length, char *mac, size_t roo
 
   toBase64((const unsigned char *)message, length, b64);
 
-  json_t body = {input: b64};
-  char *text = body.owned();
-  body.release();
+  fetch_answer_t got = transitWith("POST", "hmac/wx1-state/sha2-256", {input: b64});
   free(b64);
-
-  fetch_answer_t got = text != NULL ? transitCall("POST", "hmac/wx1-state/sha2-256", text)
-                                    : (fetch_answer_t){0};
-  free(text);
 
   if (got.ok) {
     json_t doc = got.json();
@@ -337,14 +350,8 @@ static int transitMacOk(const char *message, size_t length, const char *mac) {
 
   toBase64((const unsigned char *)message, length, b64);
 
-  json_t body = {input: b64, hmac: mac};
-  char *text = body.owned();
-  body.release();
+  fetch_answer_t got = transitWith("POST", "verify/wx1-state/sha2-256", {input: b64, hmac: mac});
   free(b64);
-
-  fetch_answer_t got = text != NULL ? transitCall("POST", "verify/wx1-state/sha2-256", text)
-                                    : (fetch_answer_t){0};
-  free(text);
 
   if (got.ok) {
     json_t doc = got.json();

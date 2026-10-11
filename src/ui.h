@@ -1992,27 +1992,26 @@ static http_response_t uiPcrRef(http_request_t *req) {
   return back;
 }
 
-static bool removePcrRef(yyjson_mut_doc *doc, yyjson_mut_val *root, void *with) {
+static bool removePcrRef(json_t entry, void *with) {
 
-  static const char *const keys[] = {"4", "8", "9"};
   pcr_ref_t *ref = (pcr_ref_t *)with;
-  yyjson_mut_val *refs = yyjson_mut_obj_get(root, "pcr_refs");
-  size_t count = yyjson_mut_arr_size(refs);
+  json_t refs = entry.pcr_refs;
+  json_t kept = meta_toJSON("[]");
+  bool removed = false;
 
-  (void)doc;
-
-  for (size_t i = 0; yyjson_mut_is_arr(refs) && i < count; ++i) {
-    yyjson_mut_val *have = yyjson_mut_arr_get(refs, i);
-    int same = 0;
-    for (int k = 0; k < 3; ++k)
-      same += yyjson_mut_equals_str(yyjson_mut_obj_get(have, keys[k]), ref->value[k]);
-    if (same == 3) {
-      yyjson_mut_arr_remove(refs, i);
-      return true;
-    }
+  for (int i = 0; i < refs.count(); ++i) {
+    if (!removed && pcrRefIs(refs.at(i), ref))
+      removed = true;
+    else
+      kept.push(refs.at(i));
   }
 
-  return false;
+  if (removed)
+    entry.pcr_refs = kept;
+
+  kept.release();
+
+  return removed;
 }
 
 static http_response_t uiPcrRefRemove(http_request_t *req) {
@@ -2035,7 +2034,7 @@ static http_response_t uiPcrRefRemove(http_request_t *req) {
 }
 
 /** One line per host: "<hv-uuid> <chip_id> [name ...]"; anything else is dropped. */
-static void poolFrom(yyjson_mut_doc *doc, yyjson_mut_val *pool, char *text) {
+static void poolFrom(json_t pool, char *text) {
 
   for (char *line = strtok(text, "\r\n"); line != NULL; line = strtok(NULL, "\r\n")) {
 
@@ -2053,11 +2052,8 @@ static void poolFrom(yyjson_mut_doc *doc, yyjson_mut_val *pool, char *text) {
     if (!isUuid(hv) || !isHex(chip, 128))
       continue;
 
-    yyjson_mut_val *h = yyjson_mut_obj(doc);
-    yyjson_mut_obj_add_strcpy(doc, h, "hv_uuid", hv);
-    yyjson_mut_obj_add_strcpy(doc, h, "chip_id", chip);
-    yyjson_mut_obj_add_strcpy(doc, h, "name", used > 0 ? line + used : "");
-    yyjson_mut_arr_append(pool, h);
+    const char *name = used > 0 ? line + used : "";
+    pool.push({hv_uuid: (const char *)hv, chip_id: (const char *)chip, name: name});
   }
 }
 
@@ -2071,48 +2067,41 @@ static http_response_t uiSaveSettings(http_request_t *req) {
     return no;
 
   const char *section = form.get("section");
-  yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
-  yyjson_mut_val *o = yyjson_mut_obj(doc);
-  yyjson_mut_doc_set_root(doc, o);
+  json_t patch = meta_toJSON("{}");
 
   if (strcmp(section, "auto") == 0) {
     /* checkboxes only arrive when ticked */
-    yyjson_mut_obj_add_bool(doc, o, "auto_attach", form.has("auto_attach"));
-    yyjson_mut_obj_add_bool(doc, o, "auto_add_host", form.has("auto_add_host"));
+    patch.auto_attach = (bool)form.has("auto_attach");
+    patch.auto_add_host = (bool)form.has("auto_add_host");
   }
 
   if (strcmp(section, "pool") == 0) {
-    yyjson_mut_val *pool = yyjson_mut_arr(doc);
+    patch.host_pool = [];
+    json_t pool = patch.host_pool;
     char *poolText = strdup(form.get("host_pool"));
     if (poolText != NULL)
-      poolFrom(doc, pool, poolText);
+      poolFrom(pool, poolText);
     free(poolText);
-    yyjson_mut_obj_add_val(doc, o, "host_pool", pool);
   }
 
   if (strcmp(section, "keys") == 0) {
-    yyjson_mut_val *keys = yyjson_mut_arr(doc);
+    patch.allowed_ssh_keys = [];
+    json_t keys = patch.allowed_ssh_keys;
     char *keyText = strdup(form.get("allowed_ssh_keys"));
     for (char *line = keyText != NULL ? strtok(keyText, "\r\n") : NULL; line != NULL;
          line = strtok(NULL, "\r\n")) {
       while (*line == ' ')
         ++line;
       if (*line != 0)
-        yyjson_mut_arr_add_strcpy(doc, keys, line);
+        keys.push((const char *)line);
     }
     free(keyText);
-    yyjson_mut_obj_add_val(doc, o, "allowed_ssh_keys", keys);
   }
 
-  if (yyjson_mut_obj_size(o) > 0) {
-    char *json = yyjson_mut_write(doc, 0, NULL);
-    json_t patch = meta_toJSON(json);
+  if (patch.count() > 0)
     storeSet("settings", NULL, patch);
-    patch.release();
-    free(json);
-  }
 
-  yyjson_mut_doc_free(doc);
+  patch.release();
   http_response_t back = uiBack(req, &form, "/settings");
   form.release();
 

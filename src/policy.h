@@ -234,7 +234,7 @@ static const char *kbsNewVtpmKey(const char *hostData) {
 static const char *pushPolicy(void) {
 
   static const char *const both[] = {"igvm_measurement", "igvm_persist_measurement"};
-  buf_t policy = {0}, body = {0};
+  buf_t policy = {0};
 
   buf_t__put(&policy, policyHead);
   refMeasurements(&policy, both, 2);
@@ -266,15 +266,17 @@ static const char *pushPolicy(void) {
     *c = *c == '+' ? '-' : *c == '/' ? '_' : *c;
 
   encoded[strcspn(encoded, "=")] = 0;
-  buf_t__printf(&body, "{\"policy\":\"%s\"}", encoded);
+  json_t body = {policy: encoded};
+  char *text = body.owned();
+  body.release();
 
   free(encoded);
   free(policy.at);
 
-  const char *wrong = body.broke ? "no memory"
-                                 : kbsAdmin("resource-policy", "application/json", body.at, body.length,
-                                            "the policy");
-  free(body.at);
+  const char *wrong = text == NULL ? "no memory"
+                                   : kbsAdmin("resource-policy", "application/json", text, strlen(text),
+                                              "the policy");
+  free(text);
 
   return wrong;
 }

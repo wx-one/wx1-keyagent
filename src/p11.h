@@ -255,10 +255,16 @@ static CK_OBJECT_HANDLE p11Aes(const char *label, bool sensitive, bool wraps) {
       {CKA_DECRYPT, &p11No, sizeof(CK_BBOOL)},
       {CKA_WRAP, wraps ? &p11Yes : &p11No, sizeof(CK_BBOOL)},
       {CKA_UNWRAP, &p11No, sizeof(CK_BBOOL)},
+      {CKA_SIGN, &p11No, sizeof(CK_BBOOL)},
+      {CKA_VERIFY, &p11No, sizeof(CK_BBOOL)},
+      {CKA_DERIVE, &p11No, sizeof(CK_BBOOL)},
       {CKA_LABEL, (void *)(label ?: ""), label != NULL ? (CK_ULONG)strlen(label) : 0},
   };
 
-  if (!p11Ok(p11->C_GenerateKey(p11Session, &gen, t, label != NULL ? 12 : 11, &key)))
+  /* every use not named is off: a token's defaults differ (SoftHSM allows them) */
+  CK_ULONG count = sizeof t / sizeof t[0] - (label != NULL ? 0 : 1);
+
+  if (!p11Ok(p11->C_GenerateKey(p11Session, &gen, t, count, &key)))
     return 0;
 
   return key;
@@ -422,10 +428,15 @@ static CK_OBJECT_HANDLE p11StateKey(void) {
       {CKA_EXTRACTABLE, &p11No, sizeof(CK_BBOOL)},
       {CKA_SIGN, &p11Yes, sizeof(CK_BBOOL)},
       {CKA_VERIFY, &p11Yes, sizeof(CK_BBOOL)},
+      {CKA_ENCRYPT, &p11No, sizeof(CK_BBOOL)},
+      {CKA_DECRYPT, &p11No, sizeof(CK_BBOOL)},
+      {CKA_WRAP, &p11No, sizeof(CK_BBOOL)},
+      {CKA_UNWRAP, &p11No, sizeof(CK_BBOOL)},
+      {CKA_DERIVE, &p11No, sizeof(CK_BBOOL)},
       {CKA_LABEL, (void *)"wx1-state", 9},
   };
 
-  if (!p11Ok(p11->C_GenerateKey(p11Session, &gen, t, 10, &key)))
+  if (!p11Ok(p11->C_GenerateKey(p11Session, &gen, t, sizeof t / sizeof t[0], &key)))
     return 0;
 
   return key;

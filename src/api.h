@@ -92,6 +92,17 @@ static http_response_t answer(http_request_t *req, int code, const char *json) {
   return req.reply(code).json(out.broke ? "{\"error\":\"no memory\"}" : out.at);
 }
 
+/** The same for a document. */
+static http_response_t answerWith(http_request_t *req, int code, json_t doc) {
+
+  char *text = doc.owned();
+  http_response_t done = answer(req, code, text ?: "{\"error\":\"no memory\"}");
+
+  free(text);
+
+  return done;
+}
+
 static http_response_t refused(http_request_t *req, int code, const char *why) {
 
   char text[300];
@@ -213,7 +224,7 @@ static http_response_t apiResetLease(http_request_t *req) {
   if (!storeResetLease(req.param("id")))
     return refused(req, 503, "cannot reset the lease");
 
-  return answer(req, 200, "{\"reset\":true}");
+  return answerWith(req, 200, {reset: true});
 }
 
 /** POST /api/customer/vtpm/:hd/unbind: the customer accepts a new vTPM. */
@@ -231,7 +242,7 @@ static http_response_t apiUnbind(http_request_t *req) {
   if (!storeUnbindEk(req.param("hd")))
     return refused(req, 503, "cannot unbind");
 
-  return answer(req, 200, "{\"unbound\":true}");
+  return answerWith(req, 200, {unbound: true});
 }
 
 typedef struct {
@@ -239,39 +250,32 @@ typedef struct {
   const char *label;
 } pcr_ref_t;
 
-static bool addPcrRef(yyjson_mut_doc *doc, yyjson_mut_val *root, void *with) {
+/** Whether an entry of pcr_refs is exactly this set. */
+static bool pcrRefIs(json_t have, pcr_ref_t *ref) {
+  return strcmp(have["4"].text(), ref->value[0]) == 0 && strcmp(have["8"].text(), ref->value[1]) == 0 &&
+         strcmp(have["9"].text(), ref->value[2]) == 0;
+}
 
-  static const char *const keys[] = {"4", "8", "9"};
+static bool addPcrRef(json_t entry, void *with) {
+
   pcr_ref_t *ref = (pcr_ref_t *)with;
-  yyjson_mut_val *refs = yyjson_mut_obj_get(root, "pcr_refs");
 
-  if (refs == NULL) {
-    refs = yyjson_mut_arr(doc);
-    yyjson_mut_obj_add_val(doc, root, "pcr_refs", refs);
-  }
+  if (entry.pcr_refs.isNothing())
+    entry.pcr_refs = [];
 
-  if (!yyjson_mut_is_arr(refs))
+  json_t refs = entry.pcr_refs;
+
+  if (strcmp(refs.kind(), "array") != 0)
     return false;
 
   /* the same set once is enough */
-  yyjson_mut_val *have;
-  yyjson_mut_arr_iter it;
-  yyjson_mut_arr_iter_init(refs, &it);
-
-  while ((have = yyjson_mut_arr_iter_next(&it)) != NULL) {
-    int same = 0;
-    for (int k = 0; k < 3; ++k)
-      same += yyjson_mut_equals_str(yyjson_mut_obj_get(have, keys[k]), ref->value[k]);
-    if (same == 3)
+  for (int i = 0; i < refs.count(); ++i)
+    if (pcrRefIs(refs.at(i), ref))
       return false;
-  }
 
-  yyjson_mut_val *add = yyjson_mut_obj(doc);
-  for (int k = 0; k < 3; ++k)
-    yyjson_mut_obj_add_strcpy(doc, add, keys[k], ref->value[k]);
-  yyjson_mut_obj_add_strcpy(doc, add, "label", ref->label);
+  refs.push({"4": ref->value[0], "8": ref->value[1], "9": ref->value[2], label: ref->label});
 
-  return yyjson_mut_arr_append(refs, add);
+  return true;
 }
 
 /** POST /api/customer/pcr-refs {"4": hex, "8": hex, "9": hex, "label": text} */
@@ -297,7 +301,10 @@ static http_response_t apiPcrRef(http_request_t *req) {
 
   body.release();
 
-  return valid ? answer(req, 200, "{\"taken\":true}") : refused(req, 400, "want PCR 4, 8, 9 as hex");
+  if (!valid)
+    return refused(req, 400, "want PCR 4, 8, 9 as hex");
+
+  return answerWith(req, 200, {taken: true});
 }
 
 /* -------------------------------------------------------- the key release */
@@ -314,7 +321,7 @@ static http_response_t releaseCall(http_request_t *req, const char *step, releas
   json_t body = req.readJson();
 
   out.code = 200;
-  buf_t__put(&out.json, "");
+  out.answer = meta_toJSON("{}");
 
   if (strcmp(body.kind(), "object") != 0)
     out.refuse(400, "request is not a JSON object");
@@ -323,23 +330,26 @@ static http_response_t releaseCall(http_request_t *req, const char *step, releas
 
   body.release();
 
-  if (out.wrong == NULL && out.json.broke)
+  char *text = out.wrong == NULL ? out.answer.owned() : NULL;
+
+  if (out.wrong == NULL && text == NULL)
     out.refuse(500, "no memory");
 
   if (out.wrong != NULL || logSuccess) {
     const char *detail = out.wrong;
 
     if (detail == NULL)
-      detail = strstr(out.json.at, "\"key\"") != NULL     ? "key delivered"
-               : strstr(out.json.at, "\"ended\"") != NULL ? "lease given back"
-                                                           : "lease renewed";
+      detail = !out.answer["key"].isNothing()     ? "key delivered"
+               : !out.answer.ended.isNothing() ? "lease given back"
+                                               : "lease renewed";
 
     storeLog(out.disk, step, out.wrong == NULL, detail, out.ctx[0] ? out.ctx : NULL, "");
   }
 
-  http_response_t done = out.wrong != NULL ? refused(req, out.code, out.wrong)
-                                           : answer(req, 200, out.json.at);
-  free(out.json.at);
+  out.answer.release();
+
+  http_response_t done = out.wrong != NULL ? refused(req, out.code, out.wrong) : answer(req, 200, text);
+  free(text);
 
   return done;
 }
