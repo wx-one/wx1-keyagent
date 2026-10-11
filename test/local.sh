@@ -111,4 +111,8 @@ for i in $(seq 40); do curl -sf -m 5 --cacert "$W/tls/ca.pem" "https://localhost
 env "${LEGACY[@]}" WX_API="https://localhost:$PORT" WX_TLS="$W/tls" WX_BAO=wx1ka-test-bao \
   WX_DB_CONTAINER=wx1ka-test-db WX_AGENT_CONTAINER=wx1ka-test-agent WX_KEYSTORE="$KEYSTORE" \
   WX_POLICY="$W/kbs/policy.rego" WX_KBS_OUT="$W/kbs/resources" WX_BAO_AGENT_TOKEN="$W/secrets/openbao-token" \
-  test/api.sh
+  test/api.sh && exit 0
+# what the agent said, for a failure nobody can look at afterwards (CI)
+echo "--- the agent's log"
+docker logs wx1ka-test-agent 2>&1 | grep -v -E '\[(info|notice)\]' | tail -60
+exit 1
