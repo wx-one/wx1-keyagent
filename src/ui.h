@@ -589,19 +589,19 @@ static void shortHtml(buf_t *out, const char *text, size_t n) {
 /** A host by its chip_id, named from the pool if it is there. */
 static void chipLabel(buf_t *out, settings_t *settings, const char *chip, const char *hv) {
 
-  json_t pool = settings->data.get("host_pool");
+  json_t pool = settings->data.host_pool;
 
   for (int i = 0; settings->entry.found && i < pool.count(); ++i) {
-    json_t h = pool.at(i);
+    json_t h = pool[i];
 
-    if (strcmp(h.get("chip_id").text(), chip) == 0) {
-      if (h.get("name").text()[0] != 0) {
+    if (strcmp(h.chip_id.text(), chip) == 0) {
+      if (h.name.text()[0] != 0) {
         buf_t__put(out, "<b>");
-        buf_t__html(out, h.get("name").text());
+        buf_t__html(out, h.name.text());
         buf_t__put(out, "</b> ");
       }
       buf_t__put(out, "<code>");
-      buf_t__html(out, h.get("hv_uuid").text());
+      buf_t__html(out, h.hv_uuid.text());
       buf_t__put(out, "</code> <span class='pill ok'>im Pool</span><div class=sub>Chip <code>");
       shortHtml(out, chip, 16);
       buf_t__put(out, "</code></div>");
@@ -803,10 +803,10 @@ static void requestCard(buf_t *out, http_request_t *req, PGresult *r, int row, s
   int g = groupOf(type);
 
   for (int i = 0; i < checks.count(); ++i) {
-    const char *kind = checks.at(i).at(0).kind();
+    const char *kind = checks[i][0].kind();
     if (strcmp(kind, "null") == 0)
       ++remarks;
-    else if (checks.at(i).at(0).truth())
+    else if (checks[i][0].truth())
       ++passed;
     else
       ++failures;
@@ -838,30 +838,30 @@ static void requestCard(buf_t *out, http_request_t *req, PGresult *r, int row, s
   /* what it is about */
   buf_t__put(out, "<dl class=facts>");
 
-  if (p.get("vm_uuid").text()[0] != 0 || p.get("vm_name").text()[0] != 0) {
+  if (p.vm_uuid.text()[0] != 0 || p.vm_name.text()[0] != 0) {
     /* a request about a VM that exists names it by UUID only: the name is in its binding */
     char vmDisk[64], name[128] = "";
-    text_t vd = TEXT`vm-${p.get("vm_uuid").text()}`;
+    text_t vd = TEXT`vm-${p.vm_uuid.text()}`;
     vd.into(vmDisk, sizeof vmDisk);
-    if (p.get("vm_name").text()[0] == 0 && isDiskId(vmDisk)) {
+    if (p.vm_name.text()[0] == 0 && isDiskId(vmDisk)) {
       entry_t att = storeGet("attachments", vmDisk);
       if (att.found) {
-        text_t n = TEXT`${att.payload().get("vm_name").text()}`;
+        text_t n = TEXT`${att.payload().vm_name.text()}`;
         n.into(name, sizeof name);
       }
       att.release();
     }
     buf_t__put(out, "<dt>VM</dt><dd><b>");
-    buf_t__html(out, p.get("vm_name").text()[0] != 0 ? p.get("vm_name").text()
+    buf_t__html(out, p.vm_name.text()[0] != 0 ? p.vm_name.text()
                      : name[0] != 0                  ? name
                                                      : "ohne Namen");
     buf_t__put(out, "</b><div class=sub><code>");
-    buf_t__html(out, p.get("vm_uuid").text());
+    buf_t__html(out, p.vm_uuid.text());
     buf_t__put(out, "</code></div></dd>");
   }
 
-  const char *disk = p.get("disk_id").text();
-  if (disk[0] == 0 && strcmp(type, "create") == 0 && isUuid(p.get("vm_uuid").text()))
+  const char *disk = p.disk_id.text();
+  if (disk[0] == 0 && strcmp(type, "create") == 0 && isUuid(p.vm_uuid.text()))
     buf_t__put(out, "<dt>Disk</dt><dd>Systemdisk der VM <span class=mut>(heißt nach ihr)</span></dd>");
   else if (disk[0] != 0) {
     buf_t__put(out, "<dt>Disk</dt><dd><code>");
@@ -870,19 +870,19 @@ static void requestCard(buf_t *out, http_request_t *req, PGresult *r, int row, s
                   strncmp(disk, "vm-", 3) == 0 ? "Systemdisk" : "Volume");
   }
 
-  if (p.get("chip_id").text()[0] != 0) {
+  if (p.chip_id.text()[0] != 0) {
     buf_t__put(out, "<dt>Host</dt><dd>");
-    chipLabel(out, settings, p.get("chip_id").text(), p.get("hv_uuid").text());
+    chipLabel(out, settings, p.chip_id.text(), p.hv_uuid.text());
     buf_t__put(out, "</dd>");
   }
 
-  if (p.get("report_id").text()[0] != 0) {
+  if (p.report_id.text()[0] != 0) {
     buf_t__put(out, "<dt>Instanz</dt><dd><code>");
-    shortHtml(out, p.get("report_id").text(), 16);
+    shortHtml(out, p.report_id.text(), 16);
     buf_t__put(out, "</code> <span class=mut>SNP REPORT_ID</span></dd>");
   }
 
-  blob_t userData = blobOf(p.get("files").get("user-data"));
+  blob_t userData = blobOf(p.files["user-data"]);
   if (userData.length > 0)
     sshKeys(out, userData.at, settings);
   free(userData.at);
@@ -893,12 +893,12 @@ static void requestCard(buf_t *out, http_request_t *req, PGresult *r, int row, s
   if (failures > 0 || remarks > 0 || reason[0] != 0) {
     buf_t__put(out, "<ul class=notes>");
     for (int i = 0; i < checks.count(); ++i) {
-      json_t c = checks.at(i);
-      bool remark = strcmp(c.at(0).kind(), "null") == 0;
-      if (!remark && c.at(0).truth())
+      json_t c = checks[i];
+      bool remark = strcmp(c[0].kind(), "null") == 0;
+      if (!remark && c[0].truth())
         continue;
       buf_t__printf(out, "<li class=%s><span>", remark ? "warn" : "bad");
-      deHtml(out, c.at(1).text());
+      deHtml(out, c[1].text());
       buf_t__put(out, "</span></li>");
     }
     if (reason[0] != 0 && strcmp(reason, "denied by the customer") != 0) {
@@ -913,19 +913,19 @@ static void requestCard(buf_t *out, http_request_t *req, PGresult *r, int row, s
     buf_t__printf(out, "<details><summary>%d Prüfung%s bestanden</summary><ul class=passed>", passed,
                   passed == 1 ? "" : "en");
     for (int i = 0; i < checks.count(); ++i) {
-      json_t c = checks.at(i);
-      if (strcmp(c.at(0).kind(), "null") == 0 || !c.at(0).truth())
+      json_t c = checks[i];
+      if (strcmp(c[0].kind(), "null") == 0 || !c[0].truth())
         continue;
       buf_t__put(out, "<li>");
-      deHtml(out, c.at(1).text());
+      deHtml(out, c[1].text());
       buf_t__put(out, "</li>");
     }
     buf_t__put(out, "</ul></details>");
   }
 
   /* what the provider sent, as it sent it */
-  blob_t initdata = blobOf(p.get("initdata"));
-  json_t files = p.get("files");
+  blob_t initdata = blobOf(p.initdata);
+  json_t files = p.files;
   if (initdata.length > 0 || files.count() > 0) {
     buf_t__put(out, "<details><summary>Was der Provider geschickt hat</summary>");
     if (initdata.length > 0) {
@@ -936,7 +936,7 @@ static void requestCard(buf_t *out, http_request_t *req, PGresult *r, int row, s
       buf_t__put(out, "</pre></div>");
     }
     for (int i = 0; i < files.count(); ++i)
-      fileBlock(out, files.keyAt(i), files.at(i));
+      fileBlock(out, files.keyAt(i), files[i]);
     buf_t__put(out, "</details>");
   }
   free(initdata.at);
@@ -1097,8 +1097,8 @@ static void diskRow(buf_t *out, http_request_t *req, const char *id, settings_t 
   entry_t disk = storeGet("disks", id);
   entry_t att = storeGet("attachments", id);
   json_t d = disk.payload(), a = att.payload();
-  const char *status = disk.found ? d.get("status").text() : "?";
-  const char *mode = d.get("mode").text();
+  const char *status = disk.found ? d.status.text() : "?";
+  const char *mode = d.mode.text();
   int m = 0;
 
   for (int i = 0; i < 3; ++i)
@@ -1108,7 +1108,7 @@ static void diskRow(buf_t *out, http_request_t *req, const char *id, settings_t 
   /* a system disk is named by its VM: shown as the VM, with the disk below */
   if (system) {
     buf_t__put(out, "<tr><td><b>");
-    buf_t__html(out, att.found && a.get("vm_name").text()[0] != 0 ? a.get("vm_name").text() : "ohne Namen");
+    buf_t__html(out, att.found && a.vm_name.text()[0] != 0 ? a.vm_name.text() : "ohne Namen");
     buf_t__put(out, "</b><div class=sub><code>");
     buf_t__html(out, id);
     buf_t__put(out, "</code></div>");
@@ -1117,9 +1117,9 @@ static void diskRow(buf_t *out, http_request_t *req, const char *id, settings_t 
     buf_t__html(out, id);
     buf_t__put(out, "</code>");
   }
-  if (d.get("created").number() > 0) {
+  if (d.created.number() > 0) {
     buf_t__put(out, "<div class=sub>angelegt ");
-    when(out, d.get("created").number(), "%d.%m.%Y");
+    when(out, d.created.number(), "%d.%m.%Y");
     buf_t__put(out, "</div>");
   }
   if (strcmp(status, "deleted") == 0)
@@ -1135,9 +1135,9 @@ static void diskRow(buf_t *out, http_request_t *req, const char *id, settings_t 
   if (!system) {
     if (att.found) {
       buf_t__put(out, "<b>");
-      buf_t__html(out, a.get("vm_name").text()[0] != 0 ? a.get("vm_name").text() : "ohne Namen");
+      buf_t__html(out, a.vm_name.text()[0] != 0 ? a.vm_name.text() : "ohne Namen");
       buf_t__put(out, "</b><div class=sub><code>");
-      buf_t__html(out, a.get("vm_uuid").text());
+      buf_t__html(out, a.vm_uuid.text());
       buf_t__put(out, "</code></div>");
     } else {
       buf_t__put(out, "<span class=mut>an keiner VM</span><div class=sub>Der Schlüssel geht an niemanden.</div>");
@@ -1145,10 +1145,10 @@ static void diskRow(buf_t *out, http_request_t *req, const char *id, settings_t 
     buf_t__put(out, "</td><td>");
   }
 
-  json_t chips = a.get("chip_ids");
+  json_t chips = a.chip_ids;
   for (int i = 0; att.found && i < chips.count(); ++i) {
     buf_t__put(out, i > 0 ? "<div class=host>" : "<div>");
-    chipLabel(out, settings, chips.at(i).text(), NULL);
+    chipLabel(out, settings, chips[i].text(), NULL);
     buf_t__put(out, "</div>");
   }
   if (!att.found || chips.count() <= 0)
@@ -1160,11 +1160,11 @@ static void diskRow(buf_t *out, http_request_t *req, const char *id, settings_t 
     buf_t__printf(out, "<b>%s</b>", modes[m][1]);
     if (m == 1) {
       buf_t__put(out, "<div class=sub>");
-      buf_t__html(out, d.get("window").text());
+      buf_t__html(out, d.window.text());
       buf_t__put(out, "</div>");
     }
-    if (d.get("replay_interval").number() > 0)
-      buf_t__printf(out, "<div class=sub>Replay-Stand alle %ld s</div>", d.get("replay_interval").number());
+    if (d.replay_interval.number() > 0)
+      buf_t__printf(out, "<div class=sub>Replay-Stand alle %ld s</div>", d.replay_interval.number());
 
     buf_t__put(out, "<details><summary>Ändern</summary><form method=post action='/mode'>");
     formFields(out, req);
@@ -1176,12 +1176,12 @@ static void diskRow(buf_t *out, http_request_t *req, const char *id, settings_t 
                     modes[i][1]);
     buf_t__put(out, "</select><input type=text name=window placeholder='Mo-Fr 06:00-22:00' size=16 "
                     "aria-label='Zeitfenster' value='");
-    buf_t__html(out, d.get("window").text());
+    buf_t__html(out, d.window.text());
     buf_t__printf(out, "'></div><div class=row><label class=small title='Neuer Replay-Stand auch im "
                        "laufenden Betrieb, alle n Sekunden (0: nur beim Booten)'>Replay-Stand alle "
                        "<input type=number min=0 name=replay_interval size=6 value='%ld'> s</label>"
                        "<button class='btn sm pri'>Speichern</button></div></form></details>",
-                  d.get("replay_interval").number());
+                  d.replay_interval.number());
   }
 
   buf_t__put(out, "</td></tr>");
@@ -1200,8 +1200,8 @@ static void diskTable(buf_t *out, http_request_t *req, json_t ids, const char *p
                            "<th>Neue Instanz entsperren</th></tr></thead><tbody>");
 
   for (int i = 0; i < ids.count(); ++i)
-    if (isDiskId(ids.at(i).text()) && strncmp(ids.at(i).text(), prefix, strlen(prefix)) == 0)
-      diskRow(out, req, ids.at(i).text(), settings, system);
+    if (isDiskId(ids[i].text()) && strncmp(ids[i].text(), prefix, strlen(prefix)) == 0)
+      diskRow(out, req, ids[i].text(), settings, system);
 
   buf_t__put(out, "</tbody></table></div>");
 }
@@ -1211,7 +1211,7 @@ static int countPrefix(json_t ids, const char *prefix) {
   int n = 0;
 
   for (int i = 0; i < ids.count(); ++i)
-    n += isDiskId(ids.at(i).text()) && strncmp(ids.at(i).text(), prefix, strlen(prefix)) == 0;
+    n += isDiskId(ids[i].text()) && strncmp(ids[i].text(), prefix, strlen(prefix)) == 0;
 
   return n;
 }
@@ -1221,9 +1221,9 @@ static void diskOwner(buf_t *out, const char *diskId) {
 
   entry_t att = storeGet("attachments", diskId);
 
-  if (att.found && att.payload().get("vm_name").text()[0] != 0) {
+  if (att.found && att.payload().vm_name.text()[0] != 0) {
     buf_t__put(out, "<b>");
-    buf_t__html(out, att.payload().get("vm_name").text());
+    buf_t__html(out, att.payload().vm_name.text());
     buf_t__put(out, "</b><div class=sub><code>");
     shortHtml(out, diskId, 15);
     buf_t__put(out, "</code></div>");
@@ -1301,20 +1301,20 @@ static void vtpmRow(buf_t *out, http_request_t *req, const char *hd) {
   }
 
   buf_t__put(out, "<tr><td><b>");
-  buf_t__html(out, e.get("vm_name").text()[0] != 0 ? e.get("vm_name").text() : "ohne Namen");
+  buf_t__html(out, e.vm_name.text()[0] != 0 ? e.vm_name.text() : "ohne Namen");
   buf_t__put(out, "</b><div class=sub><code>");
-  buf_t__html(out, e.get("vm_uuid").text());
+  buf_t__html(out, e.vm_uuid.text());
   buf_t__put(out, "</code></div></td><td><code>");
-  buf_t__html(out, e.get("disk_id").text());
+  buf_t__html(out, e.disk_id.text());
   buf_t__printf(out, "</code><div class=sub>HOST_DATA <code>%.16s…</code></div></td><td>", hd);
 
-  const char *ek = e.get("ek").text();
+  const char *ek = e.ek.text();
 
   if (ek[0] != 0) {
     buf_t__put(out, "<span class='pill ok'>gebunden</span><div class=sub>EK <code>");
     shortHtml(out, ek, 16);
     buf_t__put(out, "</code> seit ");
-    when(out, e.get("ek_first").number(), "%d.%m.%Y");
+    when(out, e.ek_first.number(), "%d.%m.%Y");
     buf_t__put(out, "</div>");
     if (stand.found)
       buf_t__printf(out, "<div class=sub>Replay-Stand %ld</div>", stand.confirmed);
@@ -1409,7 +1409,7 @@ static http_response_t uiDisks(http_request_t *req) {
       buf_t__put(&out, "<div class=tbl-wrap><table><thead><tr><th>VM</th><th>Disk</th><th>EK</th><th></th>"
                        "</tr></thead><tbody>");
       for (int i = 0; i < hds.count(); ++i)
-        vtpmRow(&out, req, hds.at(i).text());
+        vtpmRow(&out, req, hds[i].text());
       buf_t__put(&out, "</tbody></table></div>");
     } else {
       buf_t__put(&out, "<div class=empty>Noch keine VM mit persistentem vTPM.</div>");
@@ -1523,7 +1523,7 @@ static http_response_t uiLog(http_request_t *req) {
       /* a refused boot chain: show it, and where to approve it */
       if (!ok && strncmp(detail, "boot chain", 10) == 0 && !PQgetisnull(r, i, 5)) {
         json_t pcrs = meta_toJSON(PQgetvalue(r, i, 5));
-        const char *p4 = pcrs.get("4").text(), *p8 = pcrs.get("8").text(), *p9 = pcrs.get("9").text();
+        const char *p4 = pcrs["4"].text(), *p8 = pcrs["8"].text(), *p9 = pcrs["9"].text();
         if (isHex(p4, 64) && isHex(p8, 64) && isHex(p9, 64)) {
           chainShort(&out, p4, p8, p9);
           buf_t__put(&out, "<div class=sub><a href='/settings?tab=bootketten'>Unter Einstellungen → "
@@ -1550,12 +1550,12 @@ static http_response_t uiLog(http_request_t *req) {
 /** Whether PCR 4/8/9 are among the approved sets in the settings. */
 static bool chainApproved(settings_t *settings, const char *p4, const char *p8, const char *p9) {
 
-  json_t refs = settings->data.get("pcr_refs");
+  json_t refs = settings->data.pcr_refs;
 
   for (int i = 0; settings->entry.found && i < refs.count(); ++i) {
-    json_t r = refs.at(i);
-    if (strcmp(r.get("4").text(), p4) == 0 && strcmp(r.get("8").text(), p8) == 0 &&
-        strcmp(r.get("9").text(), p9) == 0)
+    json_t r = refs[i];
+    if (strcmp(r["4"].text(), p4) == 0 && strcmp(r["8"].text(), p8) == 0 &&
+        strcmp(r["9"].text(), p9) == 0)
       return true;
   }
 
@@ -1633,7 +1633,7 @@ static void refusedChains(buf_t *out, http_request_t *req, PGresult *r, settings
 
 static void approvedChains(buf_t *out, http_request_t *req, settings_t *settings) {
 
-  json_t refs = settings->data.get("pcr_refs");
+  json_t refs = settings->data.pcr_refs;
 
   buf_t__put(out, "<div class=card><h2>Freigegebene Bootketten</h2><p class=lead>Bootloader, GRUB-Befehle "
                   "und Kernel/initrd der VMs, gemessen in PCR 4, 8 und 9 des vTPM. Nur VMs mit einer dieser "
@@ -1649,12 +1649,12 @@ static void approvedChains(buf_t *out, http_request_t *req, settings_t *settings
                   "</thead><tbody>");
 
   for (int i = 0; i < refs.count(); ++i) {
-    json_t r = refs.at(i);
-    const char *p4 = r.get("4").text(), *p8 = r.get("8").text(), *p9 = r.get("9").text();
+    json_t r = refs[i];
+    const char *p4 = r["4"].text(), *p8 = r["8"].text(), *p9 = r["9"].text();
     bool whole = isHex(p4, 64) && isHex(p8, 64) && isHex(p9, 64);
 
     buf_t__put(out, "<tr><td>");
-    buf_t__html(out, r.get("label").text()[0] != 0 ? r.get("label").text() : "ohne Bezeichnung");
+    buf_t__html(out, r.label.text()[0] != 0 ? r.label.text() : "ohne Bezeichnung");
     buf_t__put(out, "</td><td>");
     if (whole)
       chainShort(out, p4, p8, p9);
@@ -1683,7 +1683,7 @@ static http_response_t uiSettings(http_request_t *req) {
 
   buf_t out = {0};
   settings_t settings = settingsRead();
-  json_t pool = settings.data.get("host_pool"), keys = settings.data.get("allowed_ssh_keys");
+  json_t pool = settings.data.host_pool, keys = settings.data.allowed_ssh_keys;
   PGresult *refused = refusedChainRows();
   long nRefused = 0;
 
@@ -1742,13 +1742,13 @@ static http_response_t uiSettings(http_request_t *req) {
       buf_t__put(&out, "<div class=tbl-wrap><table><thead><tr><th>Name</th><th>HV-UUID</th><th>chip_id</th>"
                        "</tr></thead><tbody>");
       for (int i = 0; i < pool.count(); ++i) {
-        json_t h = pool.at(i);
+        json_t h = pool[i];
         buf_t__put(&out, "<tr><td>");
-        buf_t__html(&out, h.get("name").text()[0] != 0 ? h.get("name").text() : "–");
+        buf_t__html(&out, h.name.text()[0] != 0 ? h.name.text() : "–");
         buf_t__put(&out, "</td><td><code>");
-        buf_t__html(&out, h.get("hv_uuid").text());
+        buf_t__html(&out, h.hv_uuid.text());
         buf_t__put(&out, "</code></td><td><code>");
-        shortHtml(&out, h.get("chip_id").text(), 24);
+        shortHtml(&out, h.chip_id.text(), 24);
         buf_t__put(&out, "</code></td></tr>");
       }
       buf_t__put(&out, "</tbody></table></div>");
@@ -1763,13 +1763,13 @@ static http_response_t uiSettings(http_request_t *req) {
                      "<code>&lt;HV-UUID&gt; &lt;chip_id&gt; [Name]</code>. Zeilen in anderer Form werden "
                      "verworfen.</p><textarea name=host_pool rows=6 spellcheck=false>");
     for (int i = 0; i < pool.count(); ++i) {
-      json_t h = pool.at(i);
-      buf_t__html(&out, h.get("hv_uuid").text());
+      json_t h = pool[i];
+      buf_t__html(&out, h.hv_uuid.text());
       buf_t__put(&out, " ");
-      buf_t__html(&out, h.get("chip_id").text());
-      if (h.get("name").text()[0] != 0) {
+      buf_t__html(&out, h.chip_id.text());
+      if (h.name.text()[0] != 0) {
         buf_t__put(&out, " ");
-        buf_t__html(&out, h.get("name").text());
+        buf_t__html(&out, h.name.text());
       }
       buf_t__put(&out, "\n");
     }
@@ -1785,7 +1785,7 @@ static http_response_t uiSettings(http_request_t *req) {
     if (keys.count() > 0) {
       buf_t__put(&out, "<div class=tbl-wrap><table><thead><tr><th>Key</th><th>Kommentar</th></tr></thead><tbody>");
       for (int i = 0; i < keys.count(); ++i) {
-        const char *k = keys.at(i).text();
+        const char *k = keys[i].text();
         char name[2048];
         keyName(k, name, sizeof name);
         const char *comment = strlen(k) > strlen(name) ? k + strlen(name) : "";
@@ -1809,7 +1809,7 @@ static http_response_t uiSettings(http_request_t *req) {
                      "wie in <code>authorized_keys</code>.</p><textarea name=allowed_ssh_keys rows=6 "
                      "spellcheck=false>");
     for (int i = 0; i < keys.count(); ++i) {
-      buf_t__html(&out, keys.at(i).text());
+      buf_t__html(&out, keys[i].text());
       buf_t__put(&out, "\n");
     }
     buf_t__put(&out, "</textarea><div class=bar><button class='btn pri'>Speichern</button></div>"
@@ -2000,10 +2000,10 @@ static bool removePcrRef(json_t entry, void *with) {
   bool removed = false;
 
   for (int i = 0; i < refs.count(); ++i) {
-    if (!removed && pcrRefIs(refs.at(i), ref))
+    if (!removed && pcrRefIs(refs[i], ref))
       removed = true;
     else
-      kept.push(refs.at(i));
+      kept.push(refs[i]);
   }
 
   if (removed)

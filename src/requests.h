@@ -141,15 +141,15 @@ static settings_t settingsRead(void) {
 }
 
 static bool settings_t__flag(settings_t *self, const char *name) {
-  return self->entry.found && self->data.get(name).truth();
+  return self->entry.found && self->data[name].truth();
 }
 
 static bool settings_t__inPool(settings_t *self, const char *chip) {
 
-  json_t pool = self->data.get("host_pool");
+  json_t pool = self->data.host_pool;
 
   for (int i = 0; self->entry.found && i < pool.count(); ++i)
-    if (strcmp(pool.at(i).get("chip_id").text() ?: "", chip ?: "") == 0)
+    if (strcmp(pool[i].chip_id.text() ?: "", chip ?: "") == 0)
       return true;
 
   return false;
@@ -158,23 +158,23 @@ static bool settings_t__inPool(settings_t *self, const char *chip) {
 /** The chip_id the pool has for a HV UUID, or NULL. */
 static const char *settings_t__chipOf(settings_t *self, const char *hv) {
 
-  json_t pool = self->data.get("host_pool");
+  json_t pool = self->data.host_pool;
 
   for (int i = 0; self->entry.found && hv != NULL && i < pool.count(); ++i)
-    if (strcmp(pool.at(i).get("hv_uuid").text() ?: "", hv) == 0)
-      return pool.at(i).get("chip_id").text();
+    if (strcmp(pool[i].hv_uuid.text() ?: "", hv) == 0)
+      return pool[i].chip_id.text();
 
   return NULL;
 }
 
 static int settings_t__keys(settings_t *self, const char **into, int room) {
 
-  json_t keys = self->data.get("allowed_ssh_keys");
+  json_t keys = self->data.allowed_ssh_keys;
   int n = 0;
 
   for (int i = 0; self->entry.found && i < keys.count() && n < room; ++i)
-    if (keys.at(i).text() != NULL)
-      into[n++] = keys.at(i).text();
+    if (keys[i].text() != NULL)
+      into[n++] = keys[i].text();
 
   return n;
 }
@@ -189,7 +189,7 @@ static void settings_t__release(settings_t *self) {
 static bool fileMatches(json_t p, const char *name, const char *want) {
 
   char got[65];
-  blob_t file = blobOf(p.get("files").get(name));
+  blob_t file = blobOf(p.files[name]);
   bool same = false;
 
   if (file.length >= 0) {
@@ -212,7 +212,7 @@ static void checkInitdata(checks_t *checks, json_t p, const char *disk, const ch
                           char hostData[65]) {
 
   char text[256];
-  blob_t raw = blobOf(p.get("initdata"));
+  blob_t raw = blobOf(p.initdata);
   initdata_t *doc = (initdata_t *)calloc(1, sizeof(initdata_t));
 
   hostData[0] = 0;
@@ -228,7 +228,7 @@ static void checkInitdata(checks_t *checks, json_t p, const char *disk, const ch
 
   sha256Hex(raw.at, (size_t)raw.length, hostData);
 
-  const char *vm = p.get("vm_uuid").text();
+  const char *vm = p.vm_uuid.text();
   checks.ok(isUuid(vm), "VM UUID valid");
   checks.ok(strcmp(doc.get("vm.uuid") ?: "", vm ?: "-") == 0, "initdata names this VM UUID");
 
@@ -264,7 +264,7 @@ static void checkInitdata(checks_t *checks, json_t p, const char *disk, const ch
     checks.ok(fileMatches(p, name, doc->value[i]), text);
   }
 
-  checks.ok(isHex(p.get("chip_id").text(), 128), "chip_id valid");
+  checks.ok(isHex(p.chip_id.text(), 128), "chip_id valid");
 
   free(raw.at);
   free(doc);
@@ -275,7 +275,7 @@ static bool checkCloudInit(checks_t *checks, json_t p, settings_t *settings) {
 
   const char *keys[64];
   int count = settings.keys(keys, 64);
-  blob_t userData = blobOf(p.get("files").get("user-data"));
+  blob_t userData = blobOf(p.files["user-data"]);
   cloudinit_t verdict = cloudinitCheck(userData.at ?: "", userData.length > 0 ? (size_t)userData.length : 0,
                                        keys, count);
 
@@ -306,10 +306,10 @@ static bool checkCloudInit(checks_t *checks, json_t p, settings_t *settings) {
  */
 static const char *diskOf(const char *type, json_t p, char out[48]) {
 
-  const char *disk = p.get("disk_id").text();
+  const char *disk = p.disk_id.text();
 
   if (strcmp(type, "create") == 0 || disk[0] == 0) {
-    text_t t = TEXT`vm-${p.get("vm_uuid").text()}`;
+    text_t t = TEXT`vm-${p.vm_uuid.text()}`;
     t.into(out, 48);
   } else {
     text_t t = TEXT`${disk}`;
@@ -330,9 +330,9 @@ static bool validate(checks_t *checks, const char *type, json_t p) {
   const char *diskId = diskOf(type, p, diskBuf);
   entry_t disk = storeGet("disks", diskId);
   entry_t att = storeGet("attachments", diskId);
-  bool active = disk.found && strcmp(disk.payload().get("status").text() ?: "", "active") == 0;
-  const char *attachedTo = att.found ? att.payload().get("vm_uuid").text() : NULL;
-  const char *chip = p.get("chip_id").text();
+  bool active = disk.found && strcmp(disk.payload().status.text() ?: "", "active") == 0;
+  const char *attachedTo = att.found ? att.payload().vm_uuid.text() : NULL;
+  const char *chip = p.chip_id.text();
   bool inPool = settings.inPool(chip);
   bool automatic = false;
   char hostData[65];
@@ -343,7 +343,7 @@ static bool validate(checks_t *checks, const char *type, json_t p) {
   /* HV UUID (from the provider) and chip_id (from the report) have to agree
      with the pool, or the host changed its chip or the mapping is wrong: the
      customer decides, no rule does */
-  const char *known = settings.chipOf(p.get("hv_uuid").text());
+  const char *known = settings.chipOf(p.hv_uuid.text());
   if (known != NULL && strcmp(known, chip ?: "") != 0) {
     checks.note("chip_id does NOT match the HV UUID in the host pool (hardware swapped?)");
     inPool = false;
@@ -355,7 +355,7 @@ static bool validate(checks_t *checks, const char *type, json_t p) {
     checks.ok(isDiskId(diskId), "disk ID valid (vm-<uuid> or vol-<uuid>)");
 
   if (strcmp(type, "create") == 0) {
-    const char *named = p.get("disk_id").text();
+    const char *named = p.disk_id.text();
     checks.ok(named[0] == 0 || strcmp(named, diskId) == 0,
               "no disk ID of its own (a system disk is named by its VM)");
     checks.ok(isDiskId(diskId), "VM UUID valid");
@@ -375,10 +375,10 @@ static bool validate(checks_t *checks, const char *type, json_t p) {
     checks.ok(!system, "not a system disk (that belongs to its VM)");
     checks.ok(!att.found, "disk attached to no other VM");
     bool safe = checkCloudInit(checks, p, &settings);
-    bool boot = p.get("boot").truth();
+    bool boot = p.boot.truth();
 
     char vmDisk[48];
-    text_t vd = TEXT`vm-${p.get("vm_uuid").text()}`;
+    text_t vd = TEXT`vm-${p.vm_uuid.text()}`;
     vd.into(vmDisk, sizeof vmDisk);
     entry_t vm = storeGet("attachments", vmDisk);
 
@@ -386,7 +386,7 @@ static bool validate(checks_t *checks, const char *type, json_t p) {
       /* the VM's main disk: once booted from, it is encrypted and never
          "new" again - or an empty volume slipped in under its name would be
          formatted with the customer's key */
-      bool booted = disk.found && disk.payload().get("booted").truth();
+      bool booted = disk.found && disk.payload().booted.truth();
       checkInitdata(checks, p, diskId, booted ? "existing" : "new", hostData);
       checks.ok(!vm.found, "the VM has no system disk (it boots from this volume)");
     } else {
@@ -395,7 +395,7 @@ static bool validate(checks_t *checks, const char *type, json_t p) {
       /* a volume joins the VM as it is: the binding of the VM's system disk
          knows its HOST_DATA, and the provider cannot name another one */
       if (vm.found)
-        checks.ok(strcmp(vm.payload().get("host_data").text(), hostData) == 0,
+        checks.ok(strcmp(vm.payload().host_data.text(), hostData) == 0,
                   "initdata is the VM's own (as bound to its system disk)");
       else
         checks.note("the VM has no system disk here; bound to the initdata as sent");
@@ -406,21 +406,21 @@ static bool validate(checks_t *checks, const char *type, json_t p) {
     automatic = settings.flag("auto_attach") && safe && inPool;
   } else if (strcmp(type, "add_host") == 0) {
     checks.ok(att.found, "disk is attached to a VM");
-    checks.ok(attachedTo != NULL && strcmp(attachedTo, p.get("vm_uuid").text() ?: "") == 0,
+    checks.ok(attachedTo != NULL && strcmp(attachedTo, p.vm_uuid.text() ?: "") == 0,
               "request names this VM");
     checks.ok(isHex(chip, 128), "chip_id valid");
     automatic = settings.flag("auto_add_host") && inPool;
   } else if (strcmp(type, "detach") == 0) {
-    checks.ok(attachedTo != NULL && strcmp(attachedTo, p.get("vm_uuid").text() ?: "") == 0,
+    checks.ok(attachedTo != NULL && strcmp(attachedTo, p.vm_uuid.text() ?: "") == 0,
               "disk is attached to this VM");
     automatic = true;
   } else if (strcmp(type, "unlock") == 0) {
     checks.ok(att.found, "disk is attached to a VM");
   } else if (strcmp(type, "reprovision") == 0) {
     /* what is on the disk is gone after this: the customer decides, always */
-    bool main = att.found && (isSystemDisk(diskId) || att.payload().get("main").truth());
+    bool main = att.found && (isSystemDisk(diskId) || att.payload().main.truth());
     checks.ok(active, "disk exists");
-    checks.ok(attachedTo != NULL && strcmp(attachedTo, p.get("vm_uuid").text()) == 0,
+    checks.ok(attachedTo != NULL && strcmp(attachedTo, p.vm_uuid.text()) == 0,
               "disk is attached to this VM");
     checks.ok(main, "it is the VM's main disk");
     checkCloudInit(checks, p, &settings);
@@ -464,8 +464,8 @@ static const char *attach(json_t p, const char *diskId, bool withVtpm) {
 
   char key[200];
   bool taken = false;
-  blob_t raw = blobOf(p.get("initdata"));
-  blob_t userData = blobOf(p.get("files").get("user-data"));
+  blob_t raw = blobOf(p.initdata);
+  blob_t userData = blobOf(p.files["user-data"]);
   char hostData[65];
   const char *wrong = NULL;
 
@@ -478,10 +478,10 @@ static const char *attach(json_t p, const char *diskId, bool withVtpm) {
   sha256Hex(raw.at, (size_t)raw.length, hostData);
 
   /* initdata and user-data as text (blobOf ends them): cloud-config, never bytes */
-  const char *vm = p.get("vm_uuid").text(), *vmName = p.get("vm_name").text();
+  const char *vm = p.vm_uuid.text(), *vmName = p.vm_name.text();
   long now = (long)time(NULL);
   json_t binding = {vm_uuid: vm, vm_name: vmName, host_data: hostData, initdata: raw.at,
-                    user_data: userData.at ?: "", chip_ids: [p.get("chip_id").text()],
+                    user_data: userData.at ?: "", chip_ids: [p.chip_id.text()],
                     created: now, main: withVtpm};
 
   text_t at = TEXT`attachments/${diskId}`;
@@ -523,7 +523,7 @@ static bool addChip(json_t entry, void *with) {
     return false;
 
   for (int i = 0; i < chips.count(); ++i)
-    if (strcmp(chips.at(i).text(), chip) == 0)
+    if (strcmp(chips[i].text(), chip) == 0)
       return false;
 
   chips.push(chip);
@@ -544,7 +544,7 @@ static const char *reprovision(json_t p, const char *diskId) {
 
   entry_t att = storeGet("attachments", diskId);
   char oldHd[80];
-  text_t t = TEXT`${att.found ? att.payload().get("host_data").text() : ""}`;
+  text_t t = TEXT`${att.found ? att.payload().host_data.text() : ""}`;
   t.into(oldHd, sizeof oldHd);
   att.release();
 
@@ -591,11 +591,11 @@ static const char *deleteDisk(const char *diskId) {
   for (int i = 0; !failed && i < list.count(); ++i) {
 
     char hd[80];
-    text_t name = TEXT`${list.at(i).text() ?: ""}`;
+    text_t name = TEXT`${list[i].text() ?: ""}`;
     name.into(hd, sizeof hd);
 
     entry_t v = storeGet("vtpm", hd);
-    bool ours = v.found && strcmp(v.payload().get("disk_id").text() ?: "", diskId) == 0;
+    bool ours = v.found && strcmp(v.payload().disk_id.text() ?: "", diskId) == 0;
     v.release();
 
     if (!ours)
@@ -676,7 +676,7 @@ static const char *apply(const char *type, json_t p) {
 
   } else if (strcmp(type, "attach") == 0) {
 
-    bool boot = p.get("boot").truth();
+    bool boot = p.boot.truth();
 
     /* booted from, it gets the VM's vTPM; a data volume finds the VM's own */
     if ((wrong = attach(p, diskId, boot)) != NULL)
@@ -688,7 +688,7 @@ static const char *apply(const char *type, json_t p) {
 
     /* a delete racing this one: whoever comes second sees the other */
     entry_t disk = storeGet("disks", diskId);
-    bool active = disk.found && strcmp(disk.payload().get("status").text() ?: "", "active") == 0;
+    bool active = disk.found && strcmp(disk.payload().status.text() ?: "", "active") == 0;
     disk.release();
 
     if (!active) {
@@ -701,7 +701,7 @@ static const char *apply(const char *type, json_t p) {
     text_t at = TEXT`attachments/${diskId}`;
     at.into(key, sizeof key);
 
-    stateEdit(key, addChip, (void *)(p.get("chip_id").text() ?: ""));
+    stateEdit(key, addChip, (void *)(p.chip_id.text() ?: ""));
 
   } else if (strcmp(type, "detach") == 0) {
 
@@ -714,7 +714,7 @@ static const char *apply(const char *type, json_t p) {
        until the customer says so: a provider that deletes VMs must not be
        able to make the customer's backups of them unreadable */
     if (isSystemDisk(diskId))
-      askToShred(diskId, p.get("vm_uuid").text(), p.get("vm_name").text());
+      askToShred(diskId, p.vm_uuid.text(), p.vm_name.text());
 
   } else if (strcmp(type, "reprovision") == 0) {
 

@@ -128,8 +128,8 @@ static http_response_t apiSubmit(http_request_t *req) {
     return refused(req, 401, "unauthorized");
 
   json_t body = req.readJson();
-  const char *type = body.get("type").text();
-  json_t payload = body.get("payload");
+  const char *type = body.type.text();
+  json_t payload = body["payload"];
   bool known = false;
 
   for (size_t i = 0; type != NULL && i < sizeof requestTypes / sizeof requestTypes[0]; ++i)
@@ -190,7 +190,7 @@ static http_response_t apiDecide(http_request_t *req) {
     return refused(req, 401, "unauthorized");
 
   json_t body = req.readJson();
-  bool approve = body.get("approve").truth();
+  bool approve = body.approve.truth();
   long id = atol(req.param("id"));
   body.release();
 
@@ -270,7 +270,7 @@ static bool addPcrRef(json_t entry, void *with) {
 
   /* the same set once is enough */
   for (int i = 0; i < refs.count(); ++i)
-    if (pcrRefIs(refs.at(i), ref))
+    if (pcrRefIs(refs[i], ref))
       return false;
 
   refs.push({"4": ref->value[0], "8": ref->value[1], "9": ref->value[2], label: ref->label});
@@ -288,8 +288,8 @@ static http_response_t apiPcrRef(http_request_t *req) {
     return refused(req, 401, "unauthorized");
 
   json_t body = req.readJson();
-  pcr_ref_t ref = {{body.get("4").text(), body.get("8").text(), body.get("9").text()},
-                   body.get("label").text()};
+  pcr_ref_t ref = {{body["4"].text(), body["8"].text(), body["9"].text()},
+                   body.label.text()};
 
   if (ref.label[0] == 0)
     ref.label = "taken over by the customer (API)";

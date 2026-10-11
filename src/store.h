@@ -236,12 +236,12 @@ static bool stateMerge(json_t entry, void *with) {
   for (int i = 0; i < patch.count(); ++i) {
 
     const char *key = patch.keyAt(i);
-    json_t value = patch.get(key);
+    json_t value = patch[key];
 
     if (value.isNothing())
       entry.remove(key);
     else
-      entry.set(key, value);
+      entry[key] = value;
   }
 
   return true;
@@ -327,12 +327,12 @@ static replay_t storeReplay(const char *hostData) {
 
   if (entry.found) {
     json_t p = entry.payload();
-    text_t name = TEXT`${p.get("replay_nv").text() ?: ""}`;
+    text_t name = TEXT`${p.replay_nv.text() ?: ""}`;
     name.into(stand.nvName, sizeof stand.nvName);
     stand.found = stand.nvName[0] != 0;
-    stand.confirmed = p.get("replay_confirmed").number();
-    stand.issued = p.get("replay_issued").number();
-    stand.at = p.get("replay_at").number();
+    stand.confirmed = p.replay_confirmed.number();
+    stand.issued = p.replay_issued.number();
+    stand.at = p.replay_at.number();
     entry.release();
   }
 
@@ -433,7 +433,7 @@ static int storeEk(const char *hostData, char *ek, size_t room) {
   if (!entry.found)
     return 0;
 
-  text_t got = TEXT`${entry.payload().get("ek").text() ?: ""}`;
+  text_t got = TEXT`${entry.payload().ek.text() ?: ""}`;
   got.into(ek, room);
   entry.release();
 

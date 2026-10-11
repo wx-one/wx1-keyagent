@@ -134,7 +134,7 @@ static bool policyDisks(buf_t *out) {
 
   for (int i = 0; i < list.count(); ++i) {
 
-    const char *id = list.at(i).text();
+    const char *id = list[i].text();
     entry_t att = storeGet("attachments", id ?: "");
 
     if (att.failed) {
@@ -143,8 +143,8 @@ static bool policyDisks(buf_t *out) {
     }
 
     json_t a = att.payload();
-    json_t chips = a.get("chip_ids");
-    const char *hd = a.get("host_data").text();
+    json_t chips = a.chip_ids;
+    const char *hd = a.host_data.text();
 
     if (att.found && isDiskId(id) && isHex(hd, 64)) {
 
@@ -153,8 +153,8 @@ static bool policyDisks(buf_t *out) {
 
       int c = 0;
       for (int k = 0; k < chips.count(); ++k)
-        if (isHex(chips.at(k).text(), 128))
-          buf_t__printf(out, "%s\n  \"%s\"", c++ ? "," : "", chips.at(k).text());
+        if (isHex(chips[k].text(), 128))
+          buf_t__printf(out, "%s\n  \"%s\"", c++ ? "," : "", chips[k].text());
 
       buf_t__put(out, "]}");
     }

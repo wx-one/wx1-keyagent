@@ -59,7 +59,7 @@ static char *legacyRead(const char *key) {
 
   if (got.ok) {
     json_t doc = got.json();
-    json = doc.get("data").get("data").owned();
+    json = doc.data.data.owned();
     doc.release();
   }
 
@@ -89,8 +89,8 @@ static bool legacyReplay(legacy_t *self, const char *hostData, const char *json)
   bool done = !there;
 
   if (there) {
-    json_t patch = {replay_nv: old.get("nv_name").text(), replay_confirmed: old.get("confirmed").number(),
-                    replay_issued: old.get("issued").number(), replay_at: old.get("at").number()};
+    json_t patch = {replay_nv: old.nv_name.text(), replay_confirmed: old.confirmed.number(),
+                    replay_issued: old.issued.number(), replay_at: old["at"].number()};
     done = statePatch(key, patch);
     patch.release();
   }
@@ -118,12 +118,12 @@ static bool legacyWalk(legacy_t *self, const char *prefix, bool replays) {
     return false;
   }
 
-  json_t names = list.get("data").get("keys");
+  json_t names = list.data.keys;
 
   for (int i = 0; good && i < names.count(); ++i) {
 
     char key[300];
-    const char *name = names.at(i).text() ?: "";
+    const char *name = names[i].text() ?: "";
     size_t n = strlen(name);
 
     text_t k = TEXT`${prefix}${name}`;
@@ -190,11 +190,11 @@ static bool legacyKey(legacy_t *self, const char *diskId) {
   /* {"data":[byte, ...]}: the 44 characters of base64 the guest used as passphrase */
   json_t doc = got.json();
   got.release();
-  json_t list = doc.get("data").get("data");
+  json_t list = doc.data.data;
   int count = list.count();
 
   for (int i = 0; i < count && i < (int)sizeof text - 1; ++i)
-    text[i] = (char)list.at(i).number();
+    text[i] = (char)list[i].number();
 
   text[count > 0 && count < (int)sizeof text ? count : 0] = 0;
   doc.release();
@@ -247,9 +247,9 @@ static bool legacyKeys(legacy_t *self) {
 
   for (int i = 0; good && !failed && i < disks.count(); ++i) {
 
-    const char *id = disks.at(i).text() ?: "";
+    const char *id = disks[i].text() ?: "";
     entry_t disk = storeGet("disks", id);
-    bool shredded = disk.found && strcmp(disk.payload().get("status").text() ?: "", "deleted") == 0;
+    bool shredded = disk.found && strcmp(disk.payload().status.text() ?: "", "deleted") == 0;
     disk.release();
 
     if (!shredded && isDiskId(id))

@@ -184,7 +184,7 @@ static bool transitImportAs(const char *name, const unsigned char *raw, size_t l
   json_t doc = got.json();
   got.release();
 
-  const char *pem = doc.get("data").get("public_key").text();
+  const char *pem = doc.data.public_key.text();
   BIO *in = pem != NULL ? BIO_new_mem_buf(pem, -1) : NULL;
   EVP_PKEY *key = in != NULL ? PEM_read_bio_PUBKEY(in, NULL, NULL, NULL) : NULL;
   BIO_free(in);
@@ -273,8 +273,8 @@ static const char *transitWrapNamed(const char *name, EVP_PKEY *guest, char *out
   } else {
     /* {"keys": {"<version>": "<wrapped>"}}, one version since it asks for the latest */
     json_t doc = got.json();
-    json_t keys = doc.get("data").get("keys");
-    const char *wrapped = keys.get(keys.keyAt(0)).text();
+    json_t keys = doc.data.keys;
+    const char *wrapped = keys[keys.keyAt(0)].text();
 
     if (wrapped == NULL || strlen(wrapped) + 1 > room)
       wrong = "key store answered no wrapped key (OpenBao)";
@@ -324,7 +324,7 @@ static bool transitMac(const char *message, size_t length, char *mac, size_t roo
 
   if (got.ok) {
     json_t doc = got.json();
-    const char *h = doc.get("data").get("hmac").text();
+    const char *h = doc.data.hmac.text();
 
     if (h != NULL && strlen(h) + 1 <= room) {
       memcpy(mac, h, strlen(h) + 1);
@@ -355,7 +355,7 @@ static int transitMacOk(const char *message, size_t length, const char *mac) {
 
   if (got.ok) {
     json_t doc = got.json();
-    valid = doc.get("data").get("valid").truth() ? 1 : 0;
+    valid = doc.data.valid.truth() ? 1 : 0;
     doc.release();
   } else if (got.status == 400) {
     /* a mac that is not one of ours at all */

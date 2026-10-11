@@ -63,7 +63,7 @@ static bool pcrSetMatches(json_t ref, tpmPcrs_t *pcrs) {
 
     toHex(pcrs->value[which[i]], 32, got);
 
-    const char *want = ref.get(key).text();
+    const char *want = ref[key].text();
 
     if (want == NULL || strcasecmp(want, got) != 0)
       return false;
@@ -101,17 +101,17 @@ static bool pcrApproved(tpmPcrs_t *pcrs) {
 
     json_t list = meta_toJSON(text.at);
     for (int i = 0; !found && i < list.count(); ++i)
-      found = pcrSetMatches(list.at(i), pcrs);
+      found = pcrSetMatches(list[i], pcrs);
     list.release();
     free(text.at);
   }
 
   if (!found) {
     settings_t settings = settingsRead();
-    json_t list = settings.data.get("pcr_refs");
+    json_t list = settings.data.pcr_refs;
 
     for (int i = 0; settings.entry.found && !found && i < list.count(); ++i)
-      found = pcrSetMatches(list.at(i), pcrs);
+      found = pcrSetMatches(list[i], pcrs);
 
     settings.release();
   }
@@ -200,9 +200,9 @@ static const char *admit(const char *diskId, const char *reportId, const char *c
   entry_t disk = storeGet("disks", diskId);
   char mode[16], window[64];
 
-  text_t m = TEXT`${disk.found ? disk.payload().get("mode").text() : ""}`;
+  text_t m = TEXT`${disk.found ? disk.payload().mode.text() : ""}`;
   m.into(mode, sizeof mode);
-  text_t w = TEXT`${disk.found ? disk.payload().get("window").text() : ""}`;
+  text_t w = TEXT`${disk.found ? disk.payload().window.text() : ""}`;
   w.into(window, sizeof window);
   /* release() forgets whether it was there: asked before */
   bool failed = disk.failed, known = disk.found;
@@ -271,8 +271,8 @@ static const char *admit(const char *diskId, const char *reportId, const char *c
   toHex(pcrs->value[9], 32, p9);
 
   entry_t att = storeGet("attachments", diskId);
-  const char *vm = att.found ? att.payload().get("vm_uuid").text() : "";
-  const char *vmName = att.found ? att.payload().get("vm_name").text() : "";
+  const char *vm = att.found ? att.payload().vm_uuid.text() : "";
+  const char *vmName = att.found ? att.payload().vm_name.text() : "";
   json_t p = {disk_id: diskId, report_id: reportId, chip_id: chipId, reason: (const char *)reason,
               vm_uuid: vm, vm_name: vmName,
               pcrs: {"4": (const char *)p4, "8": (const char *)p8, "9": (const char *)p9}};
@@ -343,7 +343,7 @@ static void release_t__context(release_t *self, const char *chipId, const char *
 /** 1. A nonce for one disk. */
 static void challenge(release_t *out, json_t req) {
 
-  const char *diskId = req.get("disk_id").text();
+  const char *diskId = req.disk_id.text();
   unsigned char nonce[64];
   char nonceHex[129], nonceB64[96], session[33];
 
@@ -359,8 +359,8 @@ static void challenge(release_t *out, json_t req) {
   toHex(nonce, 64, nonceHex);
   toBase64(nonce, 64, nonceB64);
 
-  bool renew = req.get("renew").truth() || req.get("end").truth();
-  bool ending = req.get("end").truth();
+  bool renew = req.renew.truth() || req.end.truth();
+  bool ending = req.end.truth();
 
   sql_t gone = SQL`delete from sessions where expires < now() - interval '1 hour'`;
   dbDo(&gone);
@@ -400,10 +400,10 @@ static bool boundTo(const unsigned char *want, const unsigned char *a, size_t aL
 /** Whether `chip` is among the attachment's allowed hosts. */
 static bool chipAllowed(json_t att, const char *chip) {
 
-  json_t chips = att.get("chip_ids");
+  json_t chips = att.chip_ids;
 
   for (int i = 0; i < chips.count(); ++i)
-    if (strcmp(chips.at(i).text() ?: "", chip) == 0)
+    if (strcmp(chips[i].text() ?: "", chip) == 0)
       return true;
 
   return false;
@@ -425,7 +425,7 @@ static void attestIn_t__release(attestIn_t *self) {
 /** 2. Who is asking: this VM instance, its vTPM, its AK. */
 static void attestStep(release_t *out, json_t req, attestIn_t *in) {
 
-  const char *session = req.get("session").text() ?: "";
+  const char *session = req.session.text() ?: "";
   unsigned char nonce[64];
   snpReport_t guest, vtpm;
   const char *wrong;
@@ -449,12 +449,12 @@ static void attestStep(release_t *out, json_t req, attestIn_t *in) {
   if (!known)
     return out.refuse(403, "session unknown, used or expired");
 
-  in->initdata = blobOf(req.get("initdata"));
-  in->guestPub = blobOf(req.get("guest_pub"));
-  in->snp = blobOf(req.get("snp_report"));
-  in->svsm = blobOf(req.get("svsm_report"));
-  in->manifest = blobOf(req.get("manifest"));
-  in->ak = blobOf(req.get("ak_pub"));
+  in->initdata = blobOf(req.initdata);
+  in->guestPub = blobOf(req.guest_pub);
+  in->snp = blobOf(req.snp_report);
+  in->svsm = blobOf(req.svsm_report);
+  in->manifest = blobOf(req.manifest);
+  in->ak = blobOf(req.ak_pub);
 
   if (in->initdata.length <= 0 || in->guestPub.length <= 0 || in->snp.length <= 0 ||
       in->svsm.length <= 0 || in->manifest.length <= 0 || in->ak.length <= 2)
@@ -495,7 +495,7 @@ static void attestStep(release_t *out, json_t req, attestIn_t *in) {
     return out.refuse(403, "initdata does not match HOST_DATA");
 
   entry_t att = storeGet("attachments", out->disk);
-  bool bound = att.found && strcmp(att.payload().get("host_data").text() ?: "", guest.hostData) == 0;
+  bool bound = att.found && strcmp(att.payload().host_data.text() ?: "", guest.hostData) == 0;
   bool hostOk = att.found && chipAllowed(att.payload(), guest.chipId);
   bool failed = att.failed, attached = att.found;
   att.release();
@@ -688,7 +688,7 @@ static void releaseStep(release_t *out, json_t req, session_t *s, blob_t *parts)
   const char *wrong;
   char why[200];
 
-  if (!takeSession(req.get("session").text() ?: "", s))
+  if (!takeSession(req.session.text() ?: "", s))
     return out.refuse(403, "session unknown, used or expired (first /v1/attest)");
 
   text_t d = TEXT`${s->disk}`;
@@ -697,18 +697,18 @@ static void releaseStep(release_t *out, json_t req, session_t *s, blob_t *parts)
 
   /* an older client takes the key only as plain RSA-OAEP, which needs it in
      the clear here; it has to say it opens the wrapped form */
-  if (!s->renew && strcmp(req.get("wrap").text() ?: "", wrapName) != 0)
+  if (!s->renew && strcmp(req.wrap.text() ?: "", wrapName) != 0)
     return out.refuse(400, "the guest's wx-release-client is too old: the key comes wrapped (rsa-aes-kwp)");
 
   blob_t *secret = &parts[0], *msg = &parts[1], *sig = &parts[2], *pcrFile = &parts[3];
   blob_t *nvAtt = &parts[4], *nvSig = &parts[5];
 
-  *secret = blobOf(req.get("secret"));
-  *msg = blobOf(req.get("msg"));
-  *sig = blobOf(req.get("sig"));
-  *pcrFile = blobOf(req.get("pcrs"));
-  *nvAtt = blobOf(req.get("nv_attest"));
-  *nvSig = blobOf(req.get("nv_sig"));
+  *secret = blobOf(req.secret);
+  *msg = blobOf(req.msg);
+  *sig = blobOf(req.sig);
+  *pcrFile = blobOf(req.pcrs);
+  *nvAtt = blobOf(req.nv_attest);
+  *nvSig = blobOf(req.nv_sig);
 
   if (secret->length <= 0 || msg->length <= 0 || sig->length <= 0 || pcrFile->length <= 0)
     return out.refuse(400, "request incomplete");
@@ -765,7 +765,7 @@ static void releaseStep(release_t *out, json_t req, session_t *s, blob_t *parts)
 
   /* still bound: a detach between attest and now takes effect */
   entry_t att = storeGet("attachments", s->disk);
-  bool bound = att.found && strcmp(att.payload().get("host_data").text() ?: "", s->hostData) == 0 &&
+  bool bound = att.found && strcmp(att.payload().host_data.text() ?: "", s->hostData) == 0 &&
                chipAllowed(att.payload(), s->chipId);
   att.release();
 
@@ -805,7 +805,7 @@ static void releaseStep(release_t *out, json_t req, session_t *s, blob_t *parts)
 
     if (!due && stand.found) {
       entry_t disk = storeGet("disks", s->disk);
-      long interval = disk.found ? disk.payload().get("replay_interval").number() : 0;
+      long interval = disk.found ? disk.payload().replay_interval.number() : 0;
       disk.release();
       due = interval > 0 && (long)time(NULL) - stand.at >= interval;
     }
