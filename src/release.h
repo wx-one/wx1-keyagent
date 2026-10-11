@@ -204,13 +204,15 @@ static const char *admit(const char *diskId, const char *reportId, const char *c
   m.into(mode, sizeof mode);
   text_t w = TEXT`${disk.found ? disk.payload().get("window").text() : ""}`;
   w.into(window, sizeof window);
+  /* release() forgets whether it was there: asked before */
+  bool failed = disk.failed, known = disk.found;
   disk.release();
 
-  if (disk.failed)
+  if (failed)
     return "state not readable (database)";
 
   /* every disk the agent made has its entry; none means it was taken out */
-  if (!disk.found)
+  if (!known)
     return "disk unknown (no state entry)";
 
   /* text() answers "" for an absent key, never NULL: no mode is "always" */
