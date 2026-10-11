@@ -13,65 +13,66 @@
 
 #include "store.h"
 
-static const char policyHead[] =
-  "package policy\n"
-  "\n"
-  "import rego.v1\n"
-  "\n"
-  "default allow := false\n"
-  "\n"
-  "evidence := input.submods.cpu0[\"ear.veraison.annotated-evidence\"]\n"
-  "\n"
-  "snp := evidence.snp\n"
-  "\n"
-  "path := data[\"resource-path\"]\n"
-  "\n"
-  "# the provider's reference values (SVSM + firmware), taken over by the customer\n"
-  "allowed_measurements := {";
+static const char policyHead[] = `
+  package policy
 
-static const char policyMiddle[] =
-  "}\n"
-  "\n"
-  "# bindings of the attached disks: exact initdata (HOST_DATA) and allowed hosts\n"
-  "disks := ";
+  import rego.v1
 
-static const char policyTail[] =
-  "\n"
-  "\n"
-  "platform_ok if {\n"
-  "\tsnp.measurement in allowed_measurements\n"
-  "\tsnp.policy_debug_allowed == false\n"
-  "\tsnp.policy_migrate_ma == false\n"
-  "}\n"
-  "\n"
-  "# disk/<disk-id>/key only for the guest Linux (VMPL2) of the VM the disk is\n"
-  "# attached to, and only on allowed hosts. A disk attached nowhere gets nothing.\n"
-  "allow if {\n"
-  "\tdata.plugin == \"resource\"\n"
-  "\tplatform_ok\n"
-  "\tsnp.vmpl == 2\n"
-  "\tcount(path) == 3\n"
-  "\tpath[0] == \"disk\"\n"
-  "\tpath[2] == \"key\"\n"
-  "\tb := disks[path[1]]\n"
-  "\tevidence.init_data == b.host_data\n"
-  "\tsnp.chip_id in b.chip_ids\n"
-  "}\n"
-  "\n"
-  "# vtpm/<HOST_DATA>/state: the state key of a persistent vTPM, one per VM. Only for\n"
-  "# the SVSM (VMPL0) of exactly that VM, while a disk is attached to it, on allowed hosts.\n"
-  "allow if {\n"
-  "\tdata.plugin == \"resource\"\n"
-  "\tplatform_ok\n"
-  "\tsnp.vmpl == 0\n"
-  "\tcount(path) == 3\n"
-  "\tpath[0] == \"vtpm\"\n"
-  "\tpath[2] == \"state\"\n"
-  "\tpath[1] == evidence.init_data\n"
-  "\tsome b in disks\n"
-  "\tb.host_data == evidence.init_data\n"
-  "\tsnp.chip_id in b.chip_ids\n"
-  "}\n";
+  default allow := false
+
+  evidence := input.submods.cpu0["ear.veraison.annotated-evidence"]
+
+  snp := evidence.snp
+
+  path := data["resource-path"]
+
+  # the provider's reference values (SVSM + firmware), taken over by the customer
+  allowed_measurements := {`;
+
+static const char policyMiddle[] = `
+  }
+
+  # bindings of the attached disks: exact initdata (HOST_DATA) and allowed hosts
+  disks := `;
+
+static const char policyTail[] = `
+
+
+  platform_ok if {
+      snp.measurement in allowed_measurements
+      snp.policy_debug_allowed == false
+      snp.policy_migrate_ma == false
+  }
+
+  # disk/<disk-id>/key only for the guest Linux (VMPL2) of the VM the disk is
+  # attached to, and only on allowed hosts. A disk attached nowhere gets nothing.
+  allow if {
+      data.plugin == "resource"
+      platform_ok
+      snp.vmpl == 2
+      count(path) == 3
+      path[0] == "disk"
+      path[2] == "key"
+      b := disks[path[1]]
+      evidence.init_data == b.host_data
+      snp.chip_id in b.chip_ids
+  }
+
+  # vtpm/<HOST_DATA>/state: the state key of a persistent vTPM, one per VM. Only for
+  # the SVSM (VMPL0) of exactly that VM, while a disk is attached to it, on allowed hosts.
+  allow if {
+      data.plugin == "resource"
+      platform_ok
+      snp.vmpl == 0
+      count(path) == 3
+      path[0] == "vtpm"
+      path[2] == "state"
+      path[1] == evidence.init_data
+      some b in disks
+      b.host_data == evidence.init_data
+      snp.chip_id in b.chip_ids
+  }
+  `;
 
 /**
  * The measurements of the provider's reference file (`key=value` lines),
