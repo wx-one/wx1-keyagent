@@ -120,17 +120,18 @@ static bool legacyWalk(legacy_t *self, const char *prefix, bool replays) {
 
   json_t names = list.data.keys;
 
-  for (int i = 0; good && i < names.count(); ++i) {
+  for (each in names) {
 
     char key[300];
-    const char *name = names[i].text() ?: "";
+    const char *name = each.text() ?: "";
     size_t n = strlen(name);
 
     text_t k = TEXT`${prefix}${name}`;
     k.into(key, sizeof key);
 
     if (n > 0 && name[n - 1] == '/') {
-      good = legacyWalk(self, key, replays);
+      if (!(good = legacyWalk(self, key, replays)))
+        break;
       continue;
     }
 
@@ -156,6 +157,9 @@ static bool legacyWalk(legacy_t *self, const char *prefix, bool replays) {
 
     self->entries += good;
     free(json);
+
+    if (!good)
+      break;
   }
 
   list.release();
@@ -190,13 +194,18 @@ static bool legacyKey(legacy_t *self, const char *diskId) {
   /* {"data":[byte, ...]}: the 44 characters of base64 the guest used as passphrase */
   json_t doc = got.json();
   got.release();
-  json_t list = doc.data.data;
-  int count = list.count();
+  size_t n = 0;
+  bool fits = true;
 
-  for (int i = 0; i < count && i < (int)sizeof text - 1; ++i)
-    text[i] = (char)list[i].number();
+  for (byte in doc.data.data) {
+    if (n == sizeof text - 1) {
+      fits = false;
+      break;
+    }
+    text[n++] = (char)byte.number();
+  }
 
-  text[count > 0 && count < (int)sizeof text ? count : 0] = 0;
+  text[fits ? n : 0] = 0;
   doc.release();
 
   long length = fromBase64(text, raw, sizeof raw);
@@ -245,15 +254,15 @@ static bool legacyKeys(legacy_t *self) {
   bool failed = false, good = true;
   json_t disks = stateList("disks/", &failed);
 
-  for (int i = 0; good && !failed && i < disks.count(); ++i) {
+  for (each in disks) {
 
-    const char *id = disks[i].text() ?: "";
+    const char *id = each.text() ?: "";
     entry_t disk = storeGet("disks", id);
     bool shredded = disk.found && strcmp(disk.payload().status.text() ?: "", "deleted") == 0;
     disk.release();
 
-    if (!shredded && isDiskId(id))
-      good = legacyKey(self, id);
+    if (!shredded && isDiskId(id) && !(good = legacyKey(self, id)))
+      break;
   }
 
   disks.release();

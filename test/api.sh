@@ -30,8 +30,8 @@ failed=0
 
 bao() { docker exec -i -e BAO_ADDR=http://127.0.0.1:8200 -e BAO_TOKEN=root "$BAO" bao "$@"; }
 sql() { docker exec "$DBC" cockroach sql --insecure -d keyagent --format=tsv -e "$1" | tail -n +2; }
-cp_() { curl -s "${CA[@]}" "${CPC[@]}" -H "Authorization: Bearer ${TOKEN:-cp-secret}" -H 'content-type: application/json' "$@"; }
-cu() { curl -s "${CA[@]}" -H "Authorization: Bearer customer-secret" -H 'content-type: application/json' "$@"; }
+cp_() { curl -s -m 30 "${CA[@]}" "${CPC[@]}" -H "Authorization: Bearer ${TOKEN:-cp-secret}" -H 'content-type: application/json' "$@"; }
+cu() { curl -s -m 30 "${CA[@]}" -H "Authorization: Bearer customer-secret" -H 'content-type: application/json' "$@"; }
 uuid() { cat /proc/sys/kernel/random/uuid; }
 
 # the state: one field of an entry, and whether it is there
@@ -69,7 +69,7 @@ KEYRE='^([0-9a-f]{64}|there)$'
 
 # the customer's settings, as the UI's forms write them
 CSRF=$(printf wx-ui-csrf | openssl dgst -sha256 -hmac ui-secret -r | cut -d' ' -f1)
-uiSet() { curl -s "${CA[@]}" -u kunde:ui-secret -o /dev/null -w '%{http_code}' --data-urlencode "csrf=$CSRF" "$@" "$A/settings"; }
+uiSet() { curl -s -m 30 "${CA[@]}" -u kunde:ui-secret -o /dev/null -w '%{http_code}' --data-urlencode "csrf=$CSRF" "$@" "$A/settings"; }
 
 # <what> <got> <extended regex it must match>
 expect() {
@@ -104,8 +104,8 @@ st() { jq -r '"\(.status) \(.reason)"'; }
 decide() { cu -X POST -d "{\"approve\":$2}" "$A/api/customer/requests/$(echo "$1" | jq .id)" | st; }
 
 echo "--- the worker"
-expect "a worker sees the trust store (SSL_CERT_FILE)" "$(curl -s "${CA[@]}" "$A/health")" '"trustStore":"/[^"]+"'
-expect "  and its key store" "$(curl -s "${CA[@]}" "$A/health")" '"keyStore":"(OpenBao|PKCS#11)","keys":true'
+expect "a worker sees the trust store (SSL_CERT_FILE)" "$(curl -s -m 30 "${CA[@]}" "$A/health")" '"trustStore":"/[^"]+"'
+expect "  and its key store" "$(curl -s -m 30 "${CA[@]}" "$A/health")" '"keyStore":"(OpenBao|PKCS#11)","keys":true'
 
 if [ -n "${LEGACY_VOL:-}" ]; then
   echo "--- taking over 0.0.5 (state in wx/, disk keys in kv/)"
@@ -140,17 +140,17 @@ fi
 
 echo "--- tokens"
 expect "no token" "$(TOKEN=x req create '{}')" unauthorized
-expect "customer token cannot file" "$(curl -s "${CA[@]}" -H 'Authorization: Bearer customer-secret' -d '{}' "$A/api/requests")" unauthorized
+expect "customer token cannot file" "$(curl -s -m 30 "${CA[@]}" -H 'Authorization: Bearer customer-secret' -d '{}' "$A/api/requests")" unauthorized
 if [ -n "$T" ]; then
   echo "--- TLS"
-  cpTry() { curl -s "${CA[@]}" -H "Authorization: Bearer cp-secret" -H 'content-type: application/json' "$@" -d '{"type":"unlock","payload":{}}' "$A/api/requests"; }
+  cpTry() { curl -s -m 30 "${CA[@]}" -H "Authorization: Bearer cp-secret" -H 'content-type: application/json' "$@" -d '{"type":"unlock","payload":{}}' "$A/api/requests"; }
   expect "plain HTTP on the TLS port" "$(curl -s -o /dev/null -w '%{http_code}' "${A/https/http}/health")" "^400$"
   expect "control plane token without its certificate" "$(cpTry)" unauthorized
   expect "  with a certificate from the CA, another subject" "$(cpTry --cert "$T/other.pem" --key "$T/other.key")" unauthorized
   expect "  with a stranger's certificate: refused by TLS" "$(cpTry --cert "$T/stranger.pem" --key "$T/stranger.key" -o /dev/null -w '%{http_code}')" "^400$"
   expect "  with its certificate: through to the checks" "$(cpTry "${CPC[@]}")" "bad request"
   expect "customer API needs no certificate" "$(cu -X POST "$A/api/customer/vtpm/zz/unbind")" "bad HOST_DATA"
-  expect "UI needs no certificate" "$(curl -s "${CA[@]}" -o /dev/null -w '%{http_code}' -u kunde:ui-secret "$A/settings")" "^200$"
+  expect "UI needs no certificate" "$(curl -s -m 30 "${CA[@]}" -o /dev/null -w '%{http_code}' -u kunde:ui-secret "$A/settings")" "^200$"
 fi
 expect "unlock only from the release" "$(req unlock '{}')" "bad request"
 

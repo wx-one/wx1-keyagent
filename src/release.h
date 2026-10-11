@@ -100,8 +100,9 @@ static bool pcrApproved(tpmPcrs_t *pcrs) {
     fclose(in);
 
     json_t list = meta_toJSON(text.at);
-    for (int i = 0; !found && i < list.count(); ++i)
-      found = pcrSetMatches(list[i], pcrs);
+    for (set in list)
+      if ((found = pcrSetMatches(set, pcrs)))
+        break;
     list.release();
     free(text.at);
   }
@@ -110,8 +111,9 @@ static bool pcrApproved(tpmPcrs_t *pcrs) {
     settings_t settings = settingsRead();
     json_t list = settings.data.pcr_refs;
 
-    for (int i = 0; settings.entry.found && !found && i < list.count(); ++i)
-      found = pcrSetMatches(list[i], pcrs);
+    for (set in list)
+      if ((found = pcrSetMatches(set, pcrs)))
+        break;
 
     settings.release();
   }
@@ -402,8 +404,8 @@ static bool chipAllowed(json_t att, const char *chip) {
 
   json_t chips = att.chip_ids;
 
-  for (int i = 0; i < chips.count(); ++i)
-    if (strcmp(chips[i].text() ?: "", chip) == 0)
+  for (have in chips)
+    if (strcmp(have.text() ?: "", chip) == 0)
       return true;
 
   return false;

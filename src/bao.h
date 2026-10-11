@@ -273,8 +273,12 @@ static const char *transitWrapNamed(const char *name, EVP_PKEY *guest, char *out
   } else {
     /* {"keys": {"<version>": "<wrapped>"}}, one version since it asks for the latest */
     json_t doc = got.json();
-    json_t keys = doc.data.keys;
-    const char *wrapped = keys[keys.keyAt(0)].text();
+    const char *wrapped = NULL;
+
+    for (version in doc.data.keys) {
+      wrapped = version.text();
+      break;
+    }
 
     if (wrapped == NULL || strlen(wrapped) + 1 > room)
       wrong = "key store answered no wrapped key (OpenBao)";

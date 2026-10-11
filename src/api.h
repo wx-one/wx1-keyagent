@@ -269,8 +269,8 @@ static bool addPcrRef(json_t entry, void *with) {
     return false;
 
   /* the same set once is enough */
-  for (int i = 0; i < refs.count(); ++i)
-    if (pcrRefIs(refs[i], ref))
+  for (have in refs)
+    if (pcrRefIs(have, ref))
       return false;
 
   refs.push({"4": ref->value[0], "8": ref->value[1], "9": ref->value[2], label: ref->label});

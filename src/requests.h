@@ -148,8 +148,8 @@ static bool settings_t__inPool(settings_t *self, const char *chip) {
 
   json_t pool = self->data.host_pool;
 
-  for (int i = 0; self->entry.found && i < pool.count(); ++i)
-    if (strcmp(pool[i].chip_id.text() ?: "", chip ?: "") == 0)
+  for (host in pool)
+    if (strcmp(host.chip_id.text() ?: "", chip ?: "") == 0)
       return true;
 
   return false;
@@ -160,9 +160,9 @@ static const char *settings_t__chipOf(settings_t *self, const char *hv) {
 
   json_t pool = self->data.host_pool;
 
-  for (int i = 0; self->entry.found && hv != NULL && i < pool.count(); ++i)
-    if (strcmp(pool[i].hv_uuid.text() ?: "", hv) == 0)
-      return pool[i].chip_id.text();
+  for (host in pool)
+    if (hv != NULL && strcmp(host.hv_uuid.text() ?: "", hv) == 0)
+      return host.chip_id.text();
 
   return NULL;
 }
@@ -172,9 +172,9 @@ static int settings_t__keys(settings_t *self, const char **into, int room) {
   json_t keys = self->data.allowed_ssh_keys;
   int n = 0;
 
-  for (int i = 0; self->entry.found && i < keys.count() && n < room; ++i)
-    if (keys[i].text() != NULL)
-      into[n++] = keys[i].text();
+  for (k in keys)
+    if (n < room && k.text() != NULL)
+      into[n++] = k.text();
 
   return n;
 }
@@ -522,8 +522,8 @@ static bool addChip(json_t entry, void *with) {
   if (strcmp(chips.kind(), "array") != 0)
     return false;
 
-  for (int i = 0; i < chips.count(); ++i)
-    if (strcmp(chips[i].text(), chip) == 0)
+  for (have in chips)
+    if (strcmp(have.text(), chip) == 0)
       return false;
 
   chips.push(chip);
@@ -588,10 +588,10 @@ static const char *deleteDisk(const char *diskId) {
 
   json_t list = stateList("vtpm/", &failed);
 
-  for (int i = 0; !failed && i < list.count(); ++i) {
+  for (name_ in list) {
 
     char hd[80];
-    text_t name = TEXT`${list[i].text() ?: ""}`;
+    text_t name = TEXT`${name_.text() ?: ""}`;
     name.into(hd, sizeof hd);
 
     entry_t v = storeGet("vtpm", hd);

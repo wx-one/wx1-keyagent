@@ -233,10 +233,9 @@ static bool stateMerge(json_t entry, void *with) {
 
   json_t patch = *(json_t *)with;
 
-  for (int i = 0; i < patch.count(); ++i) {
+  for (value in patch) {
 
-    const char *key = patch.keyAt(i);
-    json_t value = patch[key];
+    const char *key = value.keyOf();
 
     if (value.isNothing())
       entry.remove(key);

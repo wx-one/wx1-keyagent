@@ -133,9 +133,9 @@ static bool policyDisks(buf_t *out) {
 
   buf_t__put(out, "{");
 
-  for (int i = 0; i < list.count(); ++i) {
+  for (each in list) {
 
-    const char *id = list[i].text();
+    const char *id = each.text();
     entry_t att = storeGet("attachments", id ?: "");
 
     if (att.failed) {
@@ -153,9 +153,9 @@ static bool policyDisks(buf_t *out) {
                     id, hd);
 
       int c = 0;
-      for (int k = 0; k < chips.count(); ++k)
-        if (isHex(chips[k].text(), 128))
-          buf_t__printf(out, "%s\n  \"%s\"", c++ ? "," : "", chips[k].text());
+      for (chip in chips)
+        if (isHex(chip.text(), 128))
+          buf_t__printf(out, "%s\n  \"%s\"", c++ ? "," : "", chip.text());
 
       buf_t__put(out, "]}");
     }

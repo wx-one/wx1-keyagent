@@ -571,8 +571,7 @@ static void chipLabel(buf_t *out, settings_t *settings, const char *chip, const 
 
   json_t pool = settings->data.host_pool;
 
-  for (int i = 0; settings->entry.found && i < pool.count(); ++i) {
-    json_t h = pool[i];
+  for (h in pool) {
 
     if (strcmp(h.chip_id.text(), chip) == 0) {
       if (h.name.text()[0] != 0) {
@@ -782,11 +781,11 @@ static void requestCard(buf_t *out, http_request_t *req, PGresult *r, int row, s
   int remarks = 0, failures = 0, passed = 0;
   int g = groupOf(type);
 
-  for (int i = 0; i < checks.count(); ++i) {
-    const char *kind = checks[i][0].kind();
+  for (c in checks) {
+    const char *kind = c[0].kind();
     if (strcmp(kind, "null") == 0)
       ++remarks;
-    else if (checks[i][0].truth())
+    else if (c[0].truth())
       ++passed;
     else
       ++failures;
@@ -872,8 +871,7 @@ static void requestCard(buf_t *out, http_request_t *req, PGresult *r, int row, s
   /* what needs a look: failed checks, remarks, the reason it ended so */
   if (failures > 0 || remarks > 0 || reason[0] != 0) {
     buf_t__put(out, "<ul class=notes>");
-    for (int i = 0; i < checks.count(); ++i) {
-      json_t c = checks[i];
+    for (c in checks) {
       bool remark = strcmp(c[0].kind(), "null") == 0;
       if (!remark && c[0].truth())
         continue;
@@ -892,8 +890,7 @@ static void requestCard(buf_t *out, http_request_t *req, PGresult *r, int row, s
   if (passed > 0) {
     buf_t__printf(out, "<details><summary>%d Prüfung%s bestanden</summary><ul class=passed>", passed,
                   passed == 1 ? "" : "en");
-    for (int i = 0; i < checks.count(); ++i) {
-      json_t c = checks[i];
+    for (c in checks) {
       if (strcmp(c[0].kind(), "null") == 0 || !c[0].truth())
         continue;
       buf_t__put(out, "<li>");
@@ -915,8 +912,8 @@ static void requestCard(buf_t *out, http_request_t *req, PGresult *r, int row, s
       buf_t__html(out, initdata.at);
       buf_t__put(out, "</pre></div>");
     }
-    for (int i = 0; i < files.count(); ++i)
-      fileBlock(out, files.keyAt(i), files[i]);
+    for (file in files)
+      fileBlock(out, file.keyOf(), file);
     buf_t__put(out, "</details>");
   }
   free(initdata.at);
@@ -1126,9 +1123,10 @@ static void diskRow(buf_t *out, http_request_t *req, const char *id, settings_t 
   }
 
   json_t chips = a.chip_ids;
-  for (int i = 0; att.found && i < chips.count(); ++i) {
-    buf_t__put(out, i > 0 ? "<div class=host>" : "<div>");
-    chipLabel(out, settings, chips[i].text(), NULL);
+  int shown = 0;
+  for (chip in chips) {
+    buf_t__put(out, shown++ > 0 ? "<div class=host>" : "<div>");
+    chipLabel(out, settings, chip.text(), NULL);
     buf_t__put(out, "</div>");
   }
   if (!att.found || chips.count() <= 0)
@@ -1179,9 +1177,9 @@ static void diskTable(buf_t *out, http_request_t *req, json_t ids, const char *p
                          : "<div class=tbl-wrap><table><thead><tr><th>Volume</th><th>An VM</th><th>Hosts</th>"
                            "<th>Neue Instanz entsperren</th></tr></thead><tbody>");
 
-  for (int i = 0; i < ids.count(); ++i)
-    if (isDiskId(ids[i].text()) && strncmp(ids[i].text(), prefix, strlen(prefix)) == 0)
-      diskRow(out, req, ids[i].text(), settings, system);
+  for (id in ids)
+    if (isDiskId(id.text()) && strncmp(id.text(), prefix, strlen(prefix)) == 0)
+      diskRow(out, req, id.text(), settings, system);
 
   buf_t__put(out, "</tbody></table></div>");
 }
@@ -1190,8 +1188,8 @@ static int countPrefix(json_t ids, const char *prefix) {
 
   int n = 0;
 
-  for (int i = 0; i < ids.count(); ++i)
-    n += isDiskId(ids[i].text()) && strncmp(ids[i].text(), prefix, strlen(prefix)) == 0;
+  for (id in ids)
+    n += isDiskId(id.text()) && strncmp(id.text(), prefix, strlen(prefix)) == 0;
 
   return n;
 }
@@ -1388,8 +1386,8 @@ static http_response_t uiDisks(http_request_t *req) {
     if (hds.count() > 0) {
       buf_t__put(&out, "<div class=tbl-wrap><table><thead><tr><th>VM</th><th>Disk</th><th>EK</th><th></th>"
                        "</tr></thead><tbody>");
-      for (int i = 0; i < hds.count(); ++i)
-        vtpmRow(&out, req, hds[i].text());
+      for (hd in hds)
+        vtpmRow(&out, req, hd.text());
       buf_t__put(&out, "</tbody></table></div>");
     } else {
       buf_t__put(&out, "<div class=empty>Noch keine VM mit persistentem vTPM.</div>");
@@ -1532,8 +1530,7 @@ static bool chainApproved(settings_t *settings, const char *p4, const char *p8, 
 
   json_t refs = settings->data.pcr_refs;
 
-  for (int i = 0; settings->entry.found && i < refs.count(); ++i) {
-    json_t r = refs[i];
+  for (r in refs) {
     if (strcmp(r["4"].text(), p4) == 0 && strcmp(r["8"].text(), p8) == 0 &&
         strcmp(r["9"].text(), p9) == 0)
       return true;
@@ -1628,8 +1625,7 @@ static void approvedChains(buf_t *out, http_request_t *req, settings_t *settings
   buf_t__put(out, "<div class=tbl-wrap><table><thead><tr><th>Bezeichnung</th><th>Werte</th><th></th></tr>"
                   "</thead><tbody>");
 
-  for (int i = 0; i < refs.count(); ++i) {
-    json_t r = refs[i];
+  for (r in refs) {
     const char *p4 = r["4"].text(), *p8 = r["8"].text(), *p9 = r["9"].text();
     bool whole = isHex(p4, 64) && isHex(p8, 64) && isHex(p9, 64);
 
@@ -1721,8 +1717,7 @@ static http_response_t uiSettings(http_request_t *req) {
     if (pool.count() > 0) {
       buf_t__put(&out, "<div class=tbl-wrap><table><thead><tr><th>Name</th><th>HV-UUID</th><th>chip_id</th>"
                        "</tr></thead><tbody>");
-      for (int i = 0; i < pool.count(); ++i) {
-        json_t h = pool[i];
+      for (h in pool) {
         buf_t__put(&out, "<tr><td>");
         buf_t__html(&out, h.name.text()[0] != 0 ? h.name.text() : "–");
         buf_t__put(&out, "</td><td><code>");
@@ -1742,8 +1737,7 @@ static http_response_t uiSettings(http_request_t *req) {
     buf_t__put(&out, "<input type=hidden name=section value=pool><p class='mut small'>Eine Zeile pro Host: "
                      "<code>&lt;HV-UUID&gt; &lt;chip_id&gt; [Name]</code>. Zeilen in anderer Form werden "
                      "verworfen.</p><textarea name=host_pool rows=6 spellcheck=false>");
-    for (int i = 0; i < pool.count(); ++i) {
-      json_t h = pool[i];
+    for (h in pool) {
       buf_t__html(&out, h.hv_uuid.text());
       buf_t__put(&out, " ");
       buf_t__html(&out, h.chip_id.text());
@@ -1764,8 +1758,8 @@ static http_response_t uiSettings(http_request_t *req) {
 
     if (keys.count() > 0) {
       buf_t__put(&out, "<div class=tbl-wrap><table><thead><tr><th>Key</th><th>Kommentar</th></tr></thead><tbody>");
-      for (int i = 0; i < keys.count(); ++i) {
-        const char *k = keys[i].text();
+      for (key in keys) {
+        const char *k = key.text();
         char name[2048];
         keyName(k, name, sizeof name);
         const char *comment = strlen(k) > strlen(name) ? k + strlen(name) : "";
@@ -1788,8 +1782,8 @@ static http_response_t uiSettings(http_request_t *req) {
     buf_t__put(&out, "<input type=hidden name=section value=keys><p class='mut small'>Eine Zeile pro Key, "
                      "wie in <code>authorized_keys</code>.</p><textarea name=allowed_ssh_keys rows=6 "
                      "spellcheck=false>");
-    for (int i = 0; i < keys.count(); ++i) {
-      buf_t__html(&out, keys[i].text());
+    for (key in keys) {
+      buf_t__html(&out, key.text());
       buf_t__put(&out, "\n");
     }
     buf_t__put(&out, "</textarea><div class=bar><button class='btn pri'>Speichern</button></div>"
@@ -1979,11 +1973,11 @@ static bool removePcrRef(json_t entry, void *with) {
   json_t kept = meta_toJSON("[]");
   bool removed = false;
 
-  for (int i = 0; i < refs.count(); ++i) {
-    if (!removed && pcrRefIs(refs[i], ref))
+  for (have in refs) {
+    if (!removed && pcrRefIs(have, ref))
       removed = true;
     else
-      kept.push(refs[i]);
+      kept.push(have);
   }
 
   if (removed)
