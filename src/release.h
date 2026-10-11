@@ -63,7 +63,7 @@ static bool pcrSetMatches(json_t ref, tpmPcrs_t *pcrs) {
 
     toHex(pcrs->value[which[i]], 32, got);
 
-    const char *want = ref[key].text();
+    const char *want = ref[(const char *)key].text();
 
     if (want == NULL || strcasecmp(want, got) != 0)
       return false;

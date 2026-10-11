@@ -89,13 +89,14 @@ tar -xzf "$tarball" -C "$WORK"
 (
   cd "$WORK/nginx-$NGINX_VERSION"
   # the prefix the release unpacks to; every path is also given at start
+  # a pointer where a number belongs (a key read as an index) is an error, not a warning
   # the agent built into nginx (--add-module): one binary, one OpenSSL, no
   # load_module - meta's addon config defines META_HTTP_BUILTIN for this.
   # nginx exports its symbols (-E); what comes from the archives stays inside
   # (--exclude-libs), so a PKCS#11 module loaded at run time with an OpenSSL
   # of its own gets its own and not ours
   ./configure --prefix=/opt/wx1-keyagent --with-http_ssl_module \
-    --with-cc-opt="-O2 -fstack-protector-strong -Wno-error -I$WORK/addon $INCS" \
+    --with-cc-opt="-O2 -fstack-protector-strong -Wno-error -Werror=int-conversion -Werror=incompatible-pointer-types -I$WORK/addon $INCS" \
     --with-ld-opt="-L$L -Wl,--exclude-libs,ALL" \
     --without-http_rewrite_module --without-http_gzip_module --without-http_auth_basic_module \
     --add-module="$WORK/addon" >"$WORK/configure.log" 2>&1 \
