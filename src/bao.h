@@ -1,11 +1,18 @@
 /**
- * OpenBao client: KV v1 for keys (mount "kv", read by the KBS), KV v2 for the
- * agent's state (mount "wx", check-and-set).
+ * OpenBao as the key store: its transit engine holds the disk keys and the key
+ * the agent's state is signed with, and does everything with them itself.
+ *
+ *   transit/keys/wx1-disk-<disk>   AES-256, exportable only wrapped (byok-export)
+ *   transit/keys/wx1-state         signs the state in the database (HMAC)
+ *   transit/keys/wx1-guest-<..>    a guest's public key, for the one release
+ *
+ * A disk key leaves OpenBao only wrapped for the guest's fresh key
+ * (wrap.h); deploy/openbao-policy.hcl denies the plain export.
  */
 #ifndef WX_BAO_H
 #define WX_BAO_H
 
-#include "util.h"
+#include "wrap.h"
 
 #include <meta_fetch.h>
 #include <meta_json.h>
@@ -13,12 +20,15 @@
 
 static char baoUrl[512];
 static char baoToken[256];
+static char baoMount[64];
 
 static bool baoConfigure(void) {
 
   text_t url = TEXT`${env("WX_OPENBAO_URL", "http://127.0.0.1:8200")}`;
-
   url.into(baoUrl, sizeof baoUrl);
+
+  text_t mount = TEXT`${env("WX_OPENBAO_TRANSIT", "transit")}`;
+  mount.into(baoMount, sizeof baoMount);
 
   return readSecret(env("WX_OPENBAO_TOKEN_FILE", "/secrets/openbao-token"), baoToken,
                     sizeof baoToken);
@@ -40,208 +50,272 @@ static fetch_answer_t baoCall(const char *method, const char *path, const char *
   return call.send();
 }
 
-/**
- * Whether the agent's state mount (wx/, KV v2) is there and usable.
- *
- * Enabled here if the token may (a root token in a test); a token with the
- * agent's own policy (deploy/openbao-policy.hcl) may not, and then the
- * operator enables it once. Either way it is checked by listing it: 200 or
- * 404 (empty) means it answers.
- */
-static bool baoEnsureStateMount(void) {
+/** A call on the transit mount: `path` below it. */
+static fetch_answer_t transitCall(const char *method, const char *path, const char *body) {
 
-  fetch_answer_t made = baoCall("POST", "sys/mounts/wx",
-                                "{\"type\":\"kv\",\"options\":{\"version\":\"2\"}}");
-  made.release();
+  char at[512];
 
-  fetch_answer_t got = baoCall("LIST", "wx/metadata/", NULL);
-  int status = got.status;
-  got.release();
+  text_t p = TEXT`${baoMount}/${path}`;
+  p.into(at, sizeof at);
 
-  return status == 200 || status == 404;
+  return baoCall(method, at, body);
 }
 
-/* ------------------------------------------------------------ KV v2 state */
+/** The status of a call whose answer is not needed. */
+static int transitDo(const char *method, const char *path, const char *body) {
 
-/** An entry: its data (owned, release with json) and its version, 0 if absent. */
-typedef struct {
-  json_t data;
-  long version;
-  bool found;
-  bool failed;
-} bao_entry_t;
+  fetch_answer_t got = transitCall(method, path, body);
+  int status = got.status;
 
-static bao_entry_t baoRead(const char *key) {
+  got.release();
 
-  char path[512];
-  bao_entry_t entry = {0};
+  return status;
+}
 
-  text_t at = TEXT`wx/data/${key}`;
+/** Removes a key for good. A key absent already is fine. */
+static bool transitDelete(const char *name) {
 
-  at.into(path, sizeof path);
+  char path[200];
 
-  fetch_answer_t got = baoCall("GET", path, NULL);
+  text_t c = TEXT`keys/${name}/config`;
+  c.into(path, sizeof path);
 
-  if (got.status == 404) {
-    got.release();
-    return entry;
+  int status = transitDo("POST", path, "{\"deletion_allowed\":true}");
+
+  if (status == 404 || status == 400) {
+    text_t k = TEXT`keys/${name}`;
+    k.into(path, sizeof path);
+    return transitDo("GET", path, NULL) == 404;
   }
 
+  if (status / 100 != 2)
+    return false;
+
+  text_t k = TEXT`keys/${name}`;
+  k.into(path, sizeof path);
+
+  status = transitDo("DELETE", path, NULL);
+
+  return status / 100 == 2 || status == 404;
+}
+
+/**
+ * The transit mount and the state key there. Enabled here if the token may
+ * (a root token in a test); a token with the agent's own policy may not, and
+ * then the operator enables it once. Either way, making the state key - which
+ * changes nothing when it exists - says whether it is usable.
+ */
+static bool transitEnsure(void) {
+
+  char path[200];
+
+  text_t m = TEXT`sys/mounts/${baoMount}`;
+  m.into(path, sizeof path);
+
+  fetch_answer_t made = baoCall("POST", path, "{\"type\":\"transit\"}");
+  made.release();
+
+  return transitDo("POST", "keys/wx1-state", "{\"type\":\"aes256-gcm96\"}") / 100 == 2;
+}
+
+/** A disk's key name. */
+static void transitDiskKey(const char *diskId, char *name, size_t room) {
+  text_t n = TEXT`wx1-disk-${diskId}`;
+  n.into(name, room);
+}
+
+/** A fresh key for the disk; an old one is destroyed first. */
+static bool transitNew(const char *diskId) {
+
+  char name[96], path[160];
+
+  transitDiskKey(diskId, name, sizeof name);
+
+  if (!transitDelete(name))
+    return false;
+
+  text_t k = TEXT`keys/${name}`;
+  k.into(path, sizeof path);
+
+  return transitDo("POST", path, "{\"type\":\"aes256-gcm96\",\"exportable\":true}") / 100 == 2;
+}
+
+/** Brings `raw` (32 bytes) in as the key `name`: wrapped for transit's own wrapping key. */
+static bool transitImportAs(const char *name, const unsigned char *raw, size_t length) {
+
+  char path[160];
+  unsigned char wrapped[1024];
+  bool done = false;
+
+  fetch_answer_t got = transitCall("GET", "wrapping_key", NULL);
+
   if (!got.ok) {
-    entry.failed = true;
     got.release();
-    return entry;
+    return false;
   }
 
   json_t doc = got.json();
   got.release();
 
-  entry.found = true;
-  entry.version = doc.get("data").get("metadata").get("version").number();
-  entry.data = doc;
+  const char *pem = doc.get("data").get("public_key").text();
+  BIO *in = pem != NULL ? BIO_new_mem_buf(pem, -1) : NULL;
+  EVP_PKEY *key = in != NULL ? PEM_read_bio_PUBKEY(in, NULL, NULL, NULL) : NULL;
+  BIO_free(in);
+  doc.release();
 
-  return entry;
-}
+  long n = key != NULL ? wrapFor(key, EVP_sha256(), raw, length, wrapped, sizeof wrapped) : -1;
+  EVP_PKEY_free(key);
 
-/** The entry's payload, a view into `entry.data`. */
-static json_t bao_entry_t__payload(bao_entry_t *self) {
-  return self->data.get("data").get("data");
-}
+  if (n > 0) {
+    char *b64 = (char *)malloc((size_t)n / 3 * 4 + 8);
 
-static void bao_entry_t__release(bao_entry_t *self) {
+    if (b64 != NULL) {
+      toBase64(wrapped, (size_t)n, b64);
+      json_t body = {ciphertext: b64, type: "aes256-gcm96", hash_function: "SHA256", exportable: true};
+      char *text = body.owned();
+      body.release();
 
-  if (self->found)
-    self->data.release();
+      text_t k = TEXT`keys/${name}/import`;
+      k.into(path, sizeof path);
 
-  self->found = false;
-}
+      done = text != NULL && transitDo("POST", path, text) / 100 == 2;
 
-/**
- * Writes `json` (an object) as the entry. `cas` is the version it must still
- * have: 0 for "must not exist yet", -1 for "whatever is there". Answers
- * whether it was written; false with `*conflict` set means someone else
- * wrote first.
- */
-static bool baoWrite(const char *key, const char *json, long cas, bool *conflict) {
+      free(text);
+      free(b64);
+    }
+  }
 
-  char path[512];
-  buf_t body = {0};
-  bool written;
-
-  text_t at = TEXT`wx/data/${key}`;
-
-  at.into(path, sizeof path);
-
-  if (cas >= 0)
-    buf_t__printf(&body, "{\"options\":{\"cas\":%ld},\"data\":%s}", cas, json);
-  else
-    buf_t__printf(&body, "{\"data\":%s}", json);
-
-  fetch_answer_t got = baoCall("POST", path, body.at);
-
-  written = got.ok;
-
-  if (conflict != NULL)
-    *conflict = !got.ok && got.status == 400 && got.body != NULL &&
-                strstr(got.body, "check-and-set") != NULL;
-
-  got.release();
-  free(body.at);
-
-  return written;
-}
-
-/** Removes an entry with all its versions. */
-static bool baoDestroy(const char *key) {
-
-  char path[512];
-
-  text_t at = TEXT`wx/metadata/${key}`;
-
-  at.into(path, sizeof path);
-
-  fetch_answer_t got = baoCall("DELETE", path, NULL);
-  bool done = got.ok || got.status == 404;
-
-  got.release();
+  OPENSSL_cleanse(wrapped, sizeof wrapped);
 
   return done;
 }
 
-/** Keys directly under a prefix ("disks/"), as a JSON array view; owned. */
-static json_t baoList(const char *prefix, bool *failed) {
+/** An old key (from KV) as the disk's key in transit. */
+static bool transitImport(const char *diskId, const unsigned char *raw, size_t length) {
 
-  char path[512];
+  char name[96];
 
-  text_t at = TEXT`wx/metadata/${prefix}`;
+  transitDiskKey(diskId, name, sizeof name);
 
-  at.into(path, sizeof path);
-
-  fetch_answer_t got = baoCall("LIST", path, NULL);
-  json_t doc = {0};
-
-  *failed = !got.ok && got.status != 404;
-
-  if (got.ok)
-    doc = got.json();
-
-  got.release();
-
-  return doc;
+  return transitDelete(name) && transitImportAs(name, raw, length);
 }
-
-/* --------------------------------------------------------------- KV v1 keys */
 
 /**
- * A key as the KBS stores and reads it: {"data":[byte, byte, ...]} under
- * kv/<path>. Writing a new value over an old one destroys the old one.
+ * Key `name` wrapped for the guest's key, in base64 into `out`. NULL, or why
+ * not. Transit takes RSA of 3072 or 4096 bits.
  */
-static bool baoPutKey(const char *path, const unsigned char *key, size_t length) {
+static const char *transitWrapNamed(const char *name, EVP_PKEY *guest, char *out, size_t room) {
 
-  char where[512];
-  buf_t body = {0};
+  char guestName[64], path[256], hex[33];
+  int bits = EVP_PKEY_get_bits(guest);
+  const char *wrong = NULL;
 
-  buf_t__put(&body, "{\"data\":[");
+  if (bits != 3072 && bits != 4096)
+    return "guest key unusable (want RSA 3072 or 4096)";
 
-  for (size_t i = 0; i < length; ++i)
-    buf_t__printf(&body, "%s%u", i ? "," : "", key[i]);
+  if (!randomHex(16, hex))
+    return "no randomness";
 
-  buf_t__put(&body, "]}");
+  char *pem = wrapPem(guest);
 
-  text_t at = TEXT`kv/${path}`;
+  if (pem == NULL)
+    return "no memory";
 
-  at.into(where, sizeof where);
+  text_t g = TEXT`wx1-guest-${hex}`;
+  g.into(guestName, sizeof guestName);
 
-  fetch_answer_t got = baoCall("POST", where, body.at);
-  bool done = got.ok;
+  text_t type = TEXT`rsa-${bits}`;
+  char typeText[16];
+  type.into(typeText, sizeof typeText);
+
+  json_t body = {public_key: pem, type: typeText};
+  char *text = body.owned();
+  body.release();
+  free(pem);
+
+  text_t i = TEXT`keys/${guestName}/import`;
+  i.into(path, sizeof path);
+
+  int status = text != NULL ? transitDo("POST", path, text) : 0;
+  free(text);
+
+  if (status / 100 != 2)
+    return "key store refused the guest key (OpenBao)";
+
+  text_t e = TEXT`byok-export/${guestName}/${name}/latest`;
+  e.into(path, sizeof path);
+
+  fetch_answer_t got = transitCall("GET", path, NULL);
+
+  if (got.status == 400 || got.status == 404) {
+    wrong = "disk key not found (OpenBao)";
+  } else if (!got.ok) {
+    wrong = "key store cannot wrap the disk key (OpenBao)";
+  } else {
+    /* {"keys": {"<version>": "<wrapped>"}}, one version since it asks for the latest */
+    json_t doc = got.json();
+    json_t keys = doc.get("data").get("keys");
+    const char *wrapped = keys.get(keys.keyAt(0)).text();
+
+    if (wrapped == NULL || strlen(wrapped) + 1 > room)
+      wrong = "key store answered no wrapped key (OpenBao)";
+    else
+      memcpy(out, wrapped, strlen(wrapped) + 1);
+
+    doc.release();
+  }
 
   got.release();
-  free(body.at);
+  transitDelete(guestName);
 
-  return done;
+  return wrong;
 }
 
-/** Reads a key back; its length, or -1. */
-static long baoGetKey(const char *path, unsigned char *into, size_t room) {
+static const char *transitWrap(const char *diskId, EVP_PKEY *guest, char *out, size_t room) {
 
-  char where[512];
-  long length = -1;
+  char name[96];
 
-  text_t at = TEXT`kv/${path}`;
+  transitDiskKey(diskId, name, sizeof name);
 
-  at.into(where, sizeof where);
+  return transitWrapNamed(name, guest, out, room);
+}
 
-  fetch_answer_t got = baoCall("GET", where, NULL);
+static bool transitShred(const char *diskId) {
+
+  char name[96];
+
+  transitDiskKey(diskId, name, sizeof name);
+
+  return transitDelete(name);
+}
+
+/** HMAC-SHA256 of `message` with the state key: "vault:v<n>:<base64>". */
+static bool transitMac(const char *message, size_t length, char *mac, size_t room) {
+
+  char *b64 = (char *)malloc(length / 3 * 4 + 8);
+  bool done = false;
+
+  if (b64 == NULL)
+    return false;
+
+  toBase64((const unsigned char *)message, length, b64);
+
+  json_t body = {input: b64};
+  char *text = body.owned();
+  body.release();
+  free(b64);
+
+  fetch_answer_t got = text != NULL ? transitCall("POST", "hmac/wx1-state/sha2-256", text)
+                                    : (fetch_answer_t){0};
+  free(text);
 
   if (got.ok) {
     json_t doc = got.json();
-    json_t bytes = doc.get("data").get("data");
-    int count = bytes.count();
+    const char *h = doc.get("data").get("hmac").text();
 
-    if (count >= 0 && (size_t)count <= room) {
-      for (int i = 0; i < count; ++i)
-        into[i] = (unsigned char)bytes.at(i).number();
-      length = count;
+    if (h != NULL && strlen(h) + 1 <= room) {
+      memcpy(mac, h, strlen(h) + 1);
+      done = true;
     }
 
     doc.release();
@@ -249,7 +323,81 @@ static long baoGetKey(const char *path, unsigned char *into, size_t room) {
 
   got.release();
 
-  return length;
+  return done;
+}
+
+/** 1 when `mac` belongs to `message`, 0 when not, -1 when OpenBao cannot say. */
+static int transitMacOk(const char *message, size_t length, const char *mac) {
+
+  char *b64 = (char *)malloc(length / 3 * 4 + 8);
+  int valid = -1;
+
+  if (b64 == NULL)
+    return -1;
+
+  toBase64((const unsigned char *)message, length, b64);
+
+  json_t body = {input: b64, hmac: mac};
+  char *text = body.owned();
+  body.release();
+  free(b64);
+
+  fetch_answer_t got = text != NULL ? transitCall("POST", "verify/wx1-state/sha2-256", text)
+                                    : (fetch_answer_t){0};
+  free(text);
+
+  if (got.ok) {
+    json_t doc = got.json();
+    valid = doc.get("data").get("valid").truth() ? 1 : 0;
+    doc.release();
+  } else if (got.status == 400) {
+    /* a mac that is not one of ours at all */
+    valid = 0;
+  }
+
+  got.release();
+
+  return valid;
+}
+
+/**
+ * Whether transit writes exactly what the guest expects: a known key
+ * imported, wrapped for a throwaway guest key, opened here. NULL, or why not.
+ */
+static const char *transitSelfTest(void) {
+
+  unsigned char raw[32], back[64];
+  char name[64], hex[33], wrapped[1400];
+  unsigned char bytes[1100];
+  const char *wrong = NULL;
+
+  if (!randomBytes(raw, sizeof raw) || !randomHex(16, hex))
+    return "no randomness";
+
+  text_t n = TEXT`wx1-check-${hex}`;
+  n.into(name, sizeof name);
+
+  EVP_PKEY *guest = wrapTestKey();
+
+  if (guest == NULL)
+    return "cannot make a test key";
+
+  if (!transitImportAs(name, raw, sizeof raw)) {
+    wrong = "transit does not import a key (BYOK import, transit/wrapping_key)";
+  } else if ((wrong = transitWrapNamed(name, guest, wrapped, sizeof wrapped)) == NULL) {
+    long length = fromBase64(wrapped, bytes, sizeof bytes);
+    long opened = length > 0 ? wrapOpen(guest, EVP_sha256(), bytes, (size_t)length, back, sizeof back) : -1;
+
+    if (opened != 32 || CRYPTO_memcmp(back, raw, 32) != 0)
+      wrong = "transit's byok-export is not RSA-OAEP(SHA-256) + AES-KWP";
+  }
+
+  transitDelete(name);
+  EVP_PKEY_free(guest);
+  OPENSSL_cleanse(raw, sizeof raw);
+  OPENSSL_cleanse(back, sizeof back);
+
+  return wrong;
 }
 
 #endif /* WX_BAO_H */

@@ -47,7 +47,8 @@ export META_ROOT
 
 rm -rf "$WORK" && mkdir -p "$WORK/addon-h" "$STAGE"
 
-INCS="-I$DEPS/include -I$DBM/include"
+# the PKCS#11 header (p11-kit's, see THIRD_PARTY_NOTICES): the module itself is the customer's, loaded at run time
+INCS="-I$DEPS/include -I$DBM/include -I$PWD/third_party/pkcs11"
 # the version the UI shows; meta resolves macros as it lowers
 VERSION_DEF="WX_VERSION=\"$VERSION\""
 L=$DEPS/lib
@@ -89,10 +90,13 @@ tar -xzf "$tarball" -C "$WORK"
   cd "$WORK/nginx-$NGINX_VERSION"
   # the prefix the release unpacks to; every path is also given at start
   # the agent built into nginx (--add-module): one binary, one OpenSSL, no
-  # load_module - meta's addon config defines META_HTTP_BUILTIN for this
+  # load_module - meta's addon config defines META_HTTP_BUILTIN for this.
+  # nginx exports its symbols (-E); what comes from the archives stays inside
+  # (--exclude-libs), so a PKCS#11 module loaded at run time with an OpenSSL
+  # of its own gets its own and not ours
   ./configure --prefix=/opt/wx1-keyagent --with-http_ssl_module \
     --with-cc-opt="-O2 -fstack-protector-strong -Wno-error -I$WORK/addon $INCS" \
-    --with-ld-opt="-L$L" \
+    --with-ld-opt="-L$L -Wl,--exclude-libs,ALL" \
     --without-http_rewrite_module --without-http_gzip_module --without-http_auth_basic_module \
     --add-module="$WORK/addon" >"$WORK/configure.log" 2>&1 \
     || { tail -20 "$WORK/configure.log" >&2; exit 1; }
@@ -104,6 +108,10 @@ tar -xzf "$tarball" -C "$WORK"
 open=$(nm -D --undefined-only "$WORK/nginx-$NGINX_VERSION/objs/nginx" \
   | awk '{print $2}' | grep -v -E '@GLIBC_|^__gmon_start__$|^_ITM_|^__cxa_finalize' || true)
 [ -z "$open" ] || { echo "the binary leaves open:" >&2; echo "$open" | head -20 >&2; exit 1; }
+# nor offers our libraries to what it loads (a PKCS#11 module)
+leaked=$(nm -D --defined-only "$WORK/nginx-$NGINX_VERSION/objs/nginx" | awk '{print $3}' \
+  | grep -E '^(EVP_|OPENSSL_|SSL_|curl_|PQ)' | head -5 || true)
+[ -z "$leaked" ] || { echo "the binary exports library symbols:" >&2; echo "$leaked" >&2; exit 1; }
 # and it is the agent: the module is in it, not loaded
 grep -q ngx_http_meta_module "$WORK/nginx-$NGINX_VERSION/objs/ngx_modules.c" \
   || { echo "the agent is not built into nginx" >&2; exit 1; }
@@ -133,6 +141,8 @@ cp -r deploy doc README.md LICENSE "$STAGE/"
   cat "$DBM/share/doc/meta-db-migrate/LICENSE"
   section "Barlow (OFL-1.1), the typeface of the UI, embedded from assets/"
   cat assets/barlow-OFL.txt
+  section "pkcs11.h from p11-kit 0.25.5, the PKCS#11 declarations (third_party/pkcs11)"
+  sed -n '1,13p' third_party/pkcs11/pkcs11.h
   section "glibc (LGPL-2.1-or-later)"
   echo "Not included: linked dynamically and provided by the host system."
 } > "$STAGE/THIRD_PARTY_NOTICES"

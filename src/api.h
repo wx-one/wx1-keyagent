@@ -228,7 +228,7 @@ static http_response_t apiUnbind(http_request_t *req) {
   if (!isHex(req.param("hd"), 64))
     return refused(req, 400, "bad HOST_DATA");
 
-  if (!storeUnbindEk(req.param("hd")) || !storeDrop("replay", req.param("hd")))
+  if (!storeUnbindEk(req.param("hd")))
     return refused(req, 503, "cannot unbind");
 
   return answer(req, 200, "{\"unbound\":true}");
@@ -293,7 +293,7 @@ static http_response_t apiPcrRef(http_request_t *req) {
 
   /* a failed edit here mostly means "already there" */
   if (valid)
-    baoEdit("settings", addPcrRef, &ref);
+    stateEdit("settings", addPcrRef, &ref);
 
   body.release();
 

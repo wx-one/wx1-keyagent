@@ -70,6 +70,15 @@ release)
   yyjson=$(sed -n 's/^#define YYJSON_VERSION_STRING "\(.*\)"/\1/p' "$YYJSON_H")
   comps+=("$(component yyjson "$yyjson" "" "" MIT "vendored in the meta runtime, linked statically")")
 
+  # the PKCS#11 declarations: a header only, the module is the customer's and loaded at run time
+  p11=third_party/pkcs11/pkcs11.h
+  comps+=("$(jq -n --arg h "$(sha256sum "$p11" | cut -d' ' -f1)" '
+    {type: "file", "bom-ref": "file:pkcs11.h", name: "pkcs11.h", group: "p11-kit", version: "0.25.5",
+     licenses: [{license: {name: "FSF unlimited permission (see THIRD_PARTY_NOTICES)"}}],
+     hashes: [{alg: "SHA-256", content: $h}],
+     description: "PKCS#11 declarations, compiled in; the PKCS#11 module itself is not part of the release",
+     externalReferences: [{type: "distribution", url: "https://github.com/p11-glue/p11-kit/blob/0.25.5/common/pkcs11.h"}]}')")
+
   # the typeface of the UI, embedded (src/assets.h, written by ci/assets.sh)
   for f in assets/*.woff2; do
     comps+=("$(jq -n --arg n "$(basename "$f")" --arg h "$(sha256sum "$f" | cut -d' ' -f1)" '

@@ -1,8 +1,9 @@
 # wx1-keyagent
 
 The customer's side of confidential VMs (AMD SEV-SNP with COCONUT-SVSM): it runs at the
-customer, holds the keys of their VMs' disks in their own OpenBao, and hands a key only to a
-VM that proves it is exactly the one the customer approved - by SNP reports signed by AMD,
+customer, keeps the keys of their VMs' disks in their own key store - OpenBao's transit
+engine or an HSM over PKCS#11, which wraps a key for the guest itself, so the agent never
+holds one - and hands a key only to a VM that proves it is exactly the one the customer approved - by SNP reports signed by AMD,
 its vTPM, a quote over its boot chain, a replay stand and a lease. The provider files
 requests ("new VM", "another host", ...) and learns only whether they were applied.
 
@@ -20,6 +21,7 @@ Written in meta (metalanguage) and served by nginx.
 ci/build.sh <version>         # the release tarball, against meta at /opt/meta (the wxone/meta image)
 ./build.sh                    # the same in the meta image of ci/meta-image, then an image wx/wx1-keyagent
 test/local.sh                 # CockroachDB, OpenBao, a KBS stub and the agent in Docker, then test/api.sh
+KEYSTORE=pkcs11 test/local.sh # the same with a SoftHSM2 token as the key store (test/Dockerfile.softhsm)
 IMAGE=<image> NO_BUILD=1 test/local.sh   # the same against another image, e.g. one from ci/Dockerfile.release
 ```
 

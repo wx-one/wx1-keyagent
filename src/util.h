@@ -89,6 +89,53 @@ static void envRestore(const char *const *names) {
 }
 
 /**
+ * Names a setting lists (blank or comma separated) kept as well, for a
+ * library whose names are not known here - a PKCS#11 module reads its own.
+ * In main() after envKeep; in a worker they are there already.
+ */
+static void envKeepListed(const char *setting) {
+
+  char names[512];
+
+  snprintf(names, sizeof names, "%s", env(setting, ""));
+
+  for (char *name = strtok(names, " ,"); name != NULL; name = strtok(NULL, " ,")) {
+
+    bool kept = false;
+
+    for (int i = 0; i < envKeptCount && !kept; ++i)
+      kept = strcmp(envKept[i].name, name) == 0;
+
+    if (kept)
+      continue;
+
+    if (envKeptCount == ENV_KEPT) {
+      fprintf(stderr, "wx1-keyagent: more than %d settings to keep\n", ENV_KEPT);
+      exit(1);
+    }
+
+    const char *v = getenv(name);
+    envKept[envKeptCount].name = strdup(name);
+    envKept[envKeptCount].value = v != NULL ? strdup(v) : NULL;
+    ++envKeptCount;
+  }
+}
+
+/** The names a setting lists put back, as envRestore does. */
+static void envRestoreListed(const char *setting) {
+
+  char names[512];
+
+  snprintf(names, sizeof names, "%s", env(setting, ""));
+
+  for (char *name = strtok(names, " ,"); name != NULL; name = strtok(NULL, " ,")) {
+    const char *v = env(name, NULL);
+    if (v != NULL)
+      setenv(name, v, 1);
+  }
+}
+
+/**
  * The first line of a file, for secrets: tokens and passwords are kept in
  * files the operator controls rather than in the environment, where every
  * process listing and crash report can see them. Read once per worker.

@@ -1,6 +1,8 @@
 /**
- * The database: what may be lost without a key release depending on it -
- * requests and their history, leases, and the log of key fetches.
+ * The database: the agent's state (store.h - signed by the key store, so
+ * that changing it outside the agent shows), requests and their history,
+ * leases, and the log of key fetches. Without it nothing is released, and
+ * without a backup of it the disks' bindings are gone with it.
  * PostgreSQL or CockroachDB; everything here is written to work on both.
  *
  * The schema comes from migrations/ (meta-db-migrate, v2), compiled into the
@@ -93,6 +95,22 @@ static int dbConnect(void) {
   return 0;
 }
 
+/**
+ * The connection closed again: in nginx's master, before the workers are
+ * forked - none of them may inherit it, nor the token.
+ */
+static void dbClose(void) {
+
+  int token;
+
+  if (database == NULL)
+    return;
+
+  dbTurn.receive(&token);
+  PQfinish(database);
+  database = NULL;
+}
+
 /** A statement with its values beside it. The caller clears the result. */
 META_OWNS static PGresult *dbAsk(const sql_t *query) {
 
@@ -123,6 +141,18 @@ static bool dbDo(const sql_t *query) {
     PQclear(r);
 
   return done;
+}
+
+/** How many rows a statement changed; -1 when it failed. */
+static long dbCount(const sql_t *query) {
+
+  PGresult *r = dbAsk(query);
+  long count = r != NULL && PQresultStatus(r) == PGRES_COMMAND_OK ? atol(PQcmdTuples(r)) : -1;
+
+  if (r != NULL)
+    PQclear(r);
+
+  return count;
 }
 
 #endif /* WX_DB_H */

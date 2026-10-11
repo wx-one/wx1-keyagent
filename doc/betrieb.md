@@ -11,13 +11,25 @@ wurden. Einen Schlüssel sieht er nie.
 | Teil | Wozu |
 |---|---|
 | wx1-keyagent | dieses Programm: Anfragen prüfen, Freigaben, Schlüsselfreigabe, UI |
-| OpenBao | hält die Schlüssel und alles, wovon eine Freigabe abhängt |
-| Trustee-KBS | gibt den vTPM-State-Schlüssel an den SVSM Ihrer VMs (liest aus OpenBao) |
-| PostgreSQL oder CockroachDB | Anfragen, Leases, Protokoll - nichts, wovon eine Freigabe abhängt |
+| Schlüsselspeicher: OpenBao **oder** ein HSM (PKCS#11) | hält die Disk-Schlüssel und den Schlüssel, mit dem der Zustand signiert ist |
+| Trustee-KBS | hält die vTPM-State-Schlüssel und gibt sie an den SVSM Ihrer VMs |
+| PostgreSQL oder CockroachDB | der Zustand (Disks, Bindungen, vTPMs, Einstellungen), Anfragen, Leases, Protokoll |
 
-Gehen die Datenbank-Inhalte verloren, gehen der Verlauf und die laufenden Leases verloren,
-keine Schlüssel. Geht OpenBao verloren, sind die Disks Ihrer VMs nicht mehr lesbar.
-**OpenBao gehört in Ihre Datensicherung.**
+Ein Disk-Schlüssel verlässt den Schlüsselspeicher nie im Klartext, auch nicht zum
+wx1-keyagent: Der Speicher verpackt ihn selbst für den Schlüssel, den die attestierte VM für
+genau diesen Abruf erzeugt hat (RSA-OAEP eines AES-Schlüssels, damit AES-KWP des
+Disk-Schlüssels). Den Zustand in der Datenbank signiert der Schlüsselspeicher (HMAC-SHA256);
+ein Eintrag, der außerhalb des Agents geändert oder angelegt wurde, wird nicht verwendet.
+
+Geht der Schlüsselspeicher verloren, sind die Disks Ihrer VMs nicht mehr lesbar. Geht die
+Datenbank verloren, sind die Bindungen weg - die Schlüssel ohne Zuordnung, die Disks damit
+ebenso. **Schlüsselspeicher, Datenbank und der Speicher Ihres KBS gehören in Ihre
+Datensicherung.**
+
+Was die Signatur nicht erkennt: einen ganzen Eintrag, der auf einen älteren Stand
+zurückgesetzt wird (etwa aus einer alten Sicherung). Das kann, wer die Datenbank betreibt -
+so wie bei OpenBao, wer dessen Storage betreibt. Ein entfernter Eintrag dagegen fällt auf:
+Die Schlüsselfreigabe verlangt den Eintrag der Disk und bei persistentem vTPM den der VM.
 
 ## Angepasster Trustee-KBS
 
@@ -37,6 +49,15 @@ schreibt, muss `snp.vmpl` ebenso prüfen**, sonst bekäme ein Bericht jeder VMPL
 
 Die Schlüsselfreigabe für Disks (`wx-release-client` → wx1-keyagent) läuft am KBS vorbei; sie
 prüft die Berichte selbst gegen AMDs Zertifikatskette.
+
+Die vTPM-State-Schlüssel legt der wx1-keyagent über die Admin-API des KBS an
+(`/kbs/v0/resource/vtpm/<host_data>/state`) und liest sie nie. Wo der KBS sie ablegt, ist
+seine Konfiguration (`[[plugins]] name = "resource"`): z. B. in OpenBao (`kv/`, KV v1), in
+einem KMS oder auf seiner Platte.
+
+Der Gast braucht einen `wx-release-client`, der den verpackten Schlüssel öffnet (ab den
+Images zu wx1-keyagent 0.0.6). Ein älterer Client wird mit *der wx-release-client des Gasts
+ist zu alt* abgewiesen.
 
 ## Einrichten
 
@@ -72,18 +93,62 @@ braucht; was genau, steht im Image-SBOM der Release (`.image.cdx.json`). Secrets
 `/secrets` einhängen, Einstellungen als Umgebung; `/var/lib/wx1-keyagent/kds` ist ein
 Volume für AMDs Zertifikate.
 
-### OpenBao
+### Schlüsselspeicher: OpenBao (Standard)
+
+`WX_KEYSTORE=openbao`. Die Disk-Schlüssel liegen in der Transit-Engine, jeder als eigener
+Schlüssel `wx1-disk-<disk>`, exportierbar nur verpackt (`byok-export`).
 
 ```
-bao secrets enable -path=kv -version=1 kv          # Schlüssel, liest auch der KBS
-bao secrets enable -path=wx -version=2 kv          # Zustand des wx1-keyagent
+bao secrets enable -path=transit transit
 bao policy write wx1-keyagent deploy/openbao-policy.hcl
 bao token create -policy=wx1-keyagent -period=768h -field=token > /secrets/openbao-token
 ```
 
-Die Policy erlaubt dem wx1-keyagent nur, was er braucht. Die vTPM-State-Schlüssel kann er
-schreiben, aber nicht lesen; die gibt nur der KBS heraus, und nur an den SVSM genau der VM,
-zu der sie gehören.
+Die Policy erlaubt dem wx1-keyagent nur, was er braucht, und verbietet ausdrücklich den
+Export im Klartext und Backups der Schlüssel. Mit einem anderen Mount als `transit/`
+(`WX_OPENBAO_TRANSIT`) ändern sich die Pfade in der Policy mit.
+
+### Schlüsselspeicher: HSM (PKCS#11)
+
+`WX_KEYSTORE=pkcs11`. OpenBao braucht der wx1-keyagent dann nicht. Das PKCS#11-Modul
+Ihres HSM bringen Sie mit; der wx1-keyagent lädt es beim Start.
+
+| Variable | |
+|---|---|
+| `WX_PKCS11_MODULE` | Pfad zum Modul, z. B. `/usr/lib/libCryptoki2_64.so` |
+| `WX_PKCS11_TOKEN` | Label des Tokens (der Partition) |
+| `WX_PKCS11_PIN_FILE` | Datei mit der PIN des Benutzers (Standard `/secrets/pkcs11-pin`) |
+| `WX_PKCS11_ENV` | Umgebungsvariablen, die das Modul selbst liest, z. B. `ChrystokiConfigurationPath` |
+| `WX_PKCS11_OAEP` | `sha256` (Standard) oder `sha1` für ein HSM, das RSA-OAEP nur mit SHA-1 kann |
+
+Auf dem Token legt der wx1-keyagent an: `wx1-state` (HMAC-Schlüssel, nie exportierbar) beim
+ersten Start und je Disk `wx1-disk-<disk>` (AES-256, sensitiv, nur verpackt exportierbar).
+Beim Start prüft er, wie das HSM verpackt (CKM_RSA_AES_KEY_WRAP, sonst RSA-OAEP und
+CKM_AES_KEY_WRAP_KWP), indem er einen Testschlüssel verpacken lässt und selbst öffnet; das
+Ergebnis steht im Log. Kann das HSM keins davon, startet er nicht.
+
+Im Image steht das Modul nicht; hängen Sie es samt seinen Bibliotheken ein oder bauen Sie
+ein Image darauf auf.
+
+Die vTPM-State-Schlüssel liegen auch dann im KBS. Sollen sie ins HSM, braucht der KBS ein
+Speicher-Backend dafür; das bringt Trustee v0.22 für das Ressourcen-Plugin nicht mit.
+
+### Aus 0.0.5 und früher übernehmen
+
+Bis 0.0.5 lag der Zustand in OpenBao (`wx/`, KV v2) und die Disk-Schlüssel in `kv/disk/`.
+Der erste Start von 0.0.6 übernimmt beides einmal: den Zustand in die Datenbank, jeden
+Disk-Schlüssel in die Transit-Engine. Jeder Schlüssel wird geprüft (für einen Testschlüssel
+verpackt und wieder geöffnet) und erst dann aus `kv/` gelöscht. `wx/` bleibt, wie es war.
+Vorher:
+
+1. `bao secrets enable -path=transit transit`
+2. die neue `deploy/openbao-policy.hcl` schreiben (sie erlaubt das Lesen von `wx/` und
+   `kv/disk/` für die Übernahme)
+3. starten; im Log steht `import done: ...`. Danach die drei Pfade für die Übernahme aus der
+   Policy nehmen.
+
+Die VMs brauchen den neuen `wx-release-client` (siehe oben); ihre Passphrasen bleiben
+dieselben. `WX_IMPORT_OPENBAO_KV=off` schaltet die Übernahme ab.
 
 ### Geheimnisse
 
@@ -91,15 +156,17 @@ Alle als Dateien, nicht in der Umgebung (die sieht jede Prozessliste):
 
 | Datei (Standard) | Inhalt |
 |---|---|
-| `/secrets/openbao-token` | Token mit der Policy oben |
-| `/secrets/kbs-admin-token` | Admin-Token Ihres KBS (setzt die Ressourcen-Policy) |
+| `/secrets/openbao-token` | mit OpenBao: Token mit der Policy oben |
+| `/secrets/pkcs11-pin` | mit einem HSM: PIN des Benutzers auf dem Token |
+| `/secrets/kbs-admin-token` | Admin-Token Ihres KBS (setzt die Ressourcen-Policy und die vTPM-State-Schlüssel) |
 | `/secrets/cp-token` | Token, mit dem der Provider Anfragen stellt |
 | `/secrets/customer-token` | Ihr Token für die API (Freigaben, Leases, ...) |
 | `/secrets/ui-password` | Passwort der UI, Benutzer `kunde` |
 
-Ohne OpenBao-Token oder ohne den State-Mount `wx/` startet der Agent nicht (systemd bzw.
-Docker mit `--restart` versucht es erneut). Fehlt eines der anderen, bleibt nur die
-zugehörige Tür zu; der Start sagt einmal, welche.
+Ohne Schlüsselspeicher - erreichbar, mit Token bzw. PIN, und so verpackend, wie die VMs es
+erwarten - startet der Agent nicht (systemd bzw. Docker mit `--restart` versucht es erneut);
+der Start sagt, was fehlt. Fehlt eines der anderen Geheimnisse, bleibt nur die zugehörige
+Tür zu; der Start sagt einmal, welche.
 
 ### TLS
 
@@ -125,7 +192,9 @@ eine frische Nonce gebunden. TLS dort hieße, dass das VM-Image Ihre CA kennen m
 | `WX_RELEASE_LISTEN` | `127.0.0.1:8091` | Schlüsselfreigabe für die VMs - eigener Port |
 | `WX_RELEASE_GUEST_URL` | `http://192.168.122.1:8091` | wie die VMs die Freigabe erreichen (steht in ihrer initdata) |
 | `WX_DB` | `postgresql://root@127.0.0.1:26257/keyagent?sslmode=disable` | Datenbank |
+| `WX_KEYSTORE` | `openbao` | `openbao` oder `pkcs11` |
 | `WX_OPENBAO_URL` | `http://127.0.0.1:8200` | |
+| `WX_OPENBAO_TRANSIT` | `transit` | Mount der Transit-Engine |
 | `WX_KBS_ADMIN_URL` | `http://127.0.0.1:8090` | |
 | `WX_REFS` | `/refs/manifest.txt` | Referenzwerte des Providers (`igvm_measurement=...`) |
 | `WX_KDS` | `/kds` | Ablage für AMDs Zertifikate (beschreibbar) |

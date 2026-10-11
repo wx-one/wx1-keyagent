@@ -1,38 +1,195 @@
 /**
  * The agent's state, by what it means rather than where it lives.
  *
- * In OpenBao (wx/, KV v2), because key releases depend on it:
+ * In the table `state`, one row per entry, signed with the key store's state
+ * key (keys.h) over its name, version and content:
  *   disks/<id>         status, release mode, time window, replay interval
  *   attachments/<id>   the binding: VM, HOST_DATA, initdata, user-data, hosts
- *   vtpm/<host_data>   the VM's vTPM: disk, VM, EK once bound
- *   replay/<host_data> the replay stand, written on its own and often
+ *   vtpm/<host_data>   the VM's vTPM: disk, VM, the EK once bound, and the
+ *                      replay stand - in one entry, so neither can go alone
  *   settings           host pool, SSH keys, auto rules, boot chain references
+ * A row whose signature is not the store's is not read: it was changed
+ * outside the agent. What the signature cannot tell is a whole row put back
+ * as it was before (an old backup) - as with OpenBao's storage, whoever runs
+ * the database can do that; and a row taken out, which is why the release
+ * asks for the entries a disk must have (release.h).
  *
- * In the database, because nothing is released on their word:
- *   requests, leases, releases (the log).
+ * Next to it, unsigned, because nothing is released on their word alone:
+ * requests, leases, releases (the log).
  *
- * Every write to OpenBao is read, change, write back with check-and-set, and
- * once more on a conflict - two workers changing one entry both get theirs.
+ * Every write is read, change, write back if the version is still the one
+ * read, and once more on a conflict - two workers changing one entry both
+ * get theirs.
  */
 #ifndef WX_STORE_H
 #define WX_STORE_H
 
-#include "bao.h"
 #include "db.h"
+#include "keys.h"
 
 #include <time.h>
 
-/* ------------------------------------------------------- OpenBao entries */
+/* --------------------------------------------------------------- entries */
 
-typedef bool (*bao_edit_t)(yyjson_mut_doc *doc, yyjson_mut_val *root, void *with);
+/** An entry: its content (owned, release with json) and its version, 0 if absent. */
+typedef struct {
+  json_t data;
+  long version;
+  bool found;
+  bool failed;
+} entry_t;
+
+/** What the signature covers: the name, the version, the content as stored. */
+static void stateSigned(buf_t *into, const char *key, long version, const char *data) {
+  buf_t__printf(into, "wx1-keyagent state\n%s\n%ld\n", key, version);
+  buf_t__put(into, data);
+}
+
+static entry_t stateRead(const char *key) {
+
+  entry_t entry = {0};
+
+  sql_t q = SQL`select data, version, mac from state where key = ${key}`;
+  PGresult *r = dbAsk(&q);
+  q.release();
+
+  if (r == NULL || PQresultStatus(r) != PGRES_TUPLES_OK) {
+    entry.failed = true;
+  } else if (PQntuples(r) == 1) {
+
+    const char *data = PQgetvalue(r, 0, 0);
+    long version = atol(PQgetvalue(r, 0, 1));
+    buf_t message = {0};
+
+    stateSigned(&message, key, version, data);
+
+    int valid = message.broke ? -1 : keysMacOk(message.at, message.length, PQgetvalue(r, 0, 2));
+    free(message.at);
+
+    if (valid == 1) {
+      entry.found = true;
+      entry.version = version;
+      entry.data = meta_toJSON(data);
+    } else {
+      entry.failed = true;
+      if (valid == 0)
+        fprintf(stderr, "wx1-keyagent: state %s is not signed by the key store: changed outside the "
+                        "agent, not used\n", key);
+    }
+  }
+
+  if (r != NULL)
+    PQclear(r);
+
+  return entry;
+}
+
+/** The entry's content. */
+static json_t entry_t__payload(entry_t *self) {
+  return self->data;
+}
+
+static void entry_t__release(entry_t *self) {
+
+  if (self->found)
+    self->data.release();
+
+  self->found = false;
+}
 
 /**
- * Changes one entry: `edit` gets the current payload as a mutable copy (an
+ * Writes `json` (an object) as the entry. `cas` is the version it must still
+ * have: 0 for "must not exist yet". Answers whether it was written; false
+ * with `*conflict` set means someone else wrote first.
+ */
+static bool stateWrite(const char *key, const char *json, long cas, bool *conflict) {
+
+  char mac[160];
+  buf_t message = {0};
+  long version = cas + 1, changed;
+
+  if (conflict != NULL)
+    *conflict = false;
+
+  stateSigned(&message, key, version, json);
+  bool signedOk = !message.broke && keysMac(message.at, message.length, mac, sizeof mac);
+  free(message.at);
+
+  if (!signedOk)
+    return false;
+
+  if (cas == 0) {
+    sql_t q = SQL`insert into state (key, version, data, mac) values (${key}, 1, ${json}, ${(const char *)mac})
+      on conflict (key) do nothing`;
+    changed = dbCount(&q);
+    q.release();
+  } else {
+    sql_t q = SQL`update state set version = ${version}, data = ${json}, mac = ${(const char *)mac},
+        updated = now()
+      where key = ${key} and version = ${cas}`;
+    changed = dbCount(&q);
+    q.release();
+  }
+
+  if (conflict != NULL)
+    *conflict = changed == 0;
+
+  return changed == 1;
+}
+
+/** Removes an entry. */
+static bool stateDrop(const char *key) {
+
+  sql_t q = SQL`delete from state where key = ${key}`;
+  bool done = dbDo(&q);
+  q.release();
+
+  return done;
+}
+
+/** The names directly under a prefix ("disks/"), as a JSON array; owned. */
+static json_t stateList(const char *prefix, bool *failed) {
+
+  /* the range [prefix, prefix with its last character one higher) */
+  char end[64];
+  size_t n = strlen(prefix);
+
+  if (n == 0 || n >= sizeof end) {
+    *failed = true;
+    return meta_toJSON("[]");
+  }
+
+  memcpy(end, prefix, n + 1);
+  end[n - 1] = (char)(end[n - 1] + 1);
+
+  sql_t q = SQL`select key from state where key > ${prefix} and key < ${(const char *)end} order by key`;
+  PGresult *r = dbAsk(&q);
+  q.release();
+
+  json_t names = meta_toJSON("[]");
+  *failed = r == NULL || PQresultStatus(r) != PGRES_TUPLES_OK;
+
+  for (int i = 0; !*failed && i < PQntuples(r); ++i) {
+    const char *name = PQgetvalue(r, i, 0) + n;
+    if (strchr(name, '/') == NULL)
+      names.push(name);
+  }
+
+  if (r != NULL)
+    PQclear(r);
+
+  return names;
+}
+
+typedef bool (*state_edit_t)(yyjson_mut_doc *doc, yyjson_mut_val *root, void *with);
+
+/**
+ * Changes one entry: `edit` gets the current content as a mutable copy (an
  * empty object when there is none) and answers whether to write it back.
  * A conflict reads again and edits again, after a short random wait that
  * grows, so writers that collided do not collide again in step.
  */
-static bool baoEdit(const char *key, bao_edit_t edit, void *with) {
+static bool stateEdit(const char *key, state_edit_t edit, void *with) {
 
   for (int attempt = 0; attempt < 12; ++attempt) {
 
@@ -42,7 +199,7 @@ static bool baoEdit(const char *key, bao_edit_t edit, void *with) {
       meta_sleepMs((long)(r % (5 << (attempt < 6 ? attempt : 6))) + 1);
     }
 
-    bao_entry_t entry = baoRead(key);
+    entry_t entry = stateRead(key);
 
     if (entry.failed)
       return false;
@@ -68,7 +225,7 @@ static bool baoEdit(const char *key, bao_edit_t edit, void *with) {
 
     char *json = yyjson_mut_write(doc, 0, NULL);
     bool conflict = false;
-    bool written = json != NULL && baoWrite(key, json, version, &conflict);
+    bool written = json != NULL && stateWrite(key, json, version, &conflict);
 
     free(json);
     yyjson_mut_doc_free(doc);
@@ -80,7 +237,7 @@ static bool baoEdit(const char *key, bao_edit_t edit, void *with) {
   return false;
 }
 
-static bool baoMerge(yyjson_mut_doc *doc, yyjson_mut_val *root, void *with) {
+static bool stateMerge(yyjson_mut_doc *doc, yyjson_mut_val *root, void *with) {
 
   yyjson_mut_val *patch = ((json_t *)with)->node;
   yyjson_mut_val *key, *value;
@@ -103,8 +260,21 @@ static bool baoMerge(yyjson_mut_doc *doc, yyjson_mut_val *root, void *with) {
 }
 
 /** Sets the top-level fields of `patch` in the entry; a null removes one. */
-static bool baoPatch(const char *key, json_t patch) {
-  return baoEdit(key, baoMerge, &patch);
+static bool statePatch(const char *key, json_t patch) {
+  return stateEdit(key, stateMerge, &patch);
+}
+
+/** A new entry, written only if there is none yet; `*taken` if there was. */
+static bool stateCreate(const char *key, json_t entry, bool *taken) {
+
+  char *json = entry.owned();
+  bool conflict = false;
+  bool written = json != NULL && stateWrite(key, json, 0, &conflict);
+
+  free(json);
+  *taken = conflict;
+
+  return written;
 }
 
 /* ---------------------------------------------- disks, attachments, settings */
@@ -113,14 +283,14 @@ static bool baoPatch(const char *key, json_t patch) {
  * disks/<id>, attachments/<id>, vtpm/<host_data>, settings: read whole,
  * changed field by field. `id` NULL for settings.
  */
-static bao_entry_t storeGet(const char *kind, const char *id) {
+static entry_t storeGet(const char *kind, const char *id) {
 
   char key[200];
 
   text_t at = id != NULL ? TEXT`${kind}/${id}` : TEXT`${kind}`;
   at.into(key, sizeof key);
 
-  return baoRead(key);
+  return stateRead(key);
 }
 
 static bool storeSet(const char *kind, const char *id, json_t patch) {
@@ -130,7 +300,7 @@ static bool storeSet(const char *kind, const char *id, json_t patch) {
   text_t at = id != NULL ? TEXT`${kind}/${id}` : TEXT`${kind}`;
   at.into(key, sizeof key);
 
-  return baoPatch(key, patch);
+  return statePatch(key, patch);
 }
 
 static bool storeDrop(const char *kind, const char *id) {
@@ -140,16 +310,16 @@ static bool storeDrop(const char *kind, const char *id) {
   text_t at = TEXT`${kind}/${id}`;
   at.into(key, sizeof key);
 
-  return baoDestroy(key);
+  return stateDrop(key);
 }
 
 /* ------------------------------------------------------------ replay stand */
 
 /**
- * replay/<host_data>: {nv_name, confirmed, issued}. The guest proves the stand
- * in its vTPM; it has to be at least the last confirmed one (never "exactly
- * the last issued": a lost answer leaves the previous one in the vTPM) and at
- * most the last issued one.
+ * In vtpm/<host_data>: replay_nv, replay_confirmed, replay_issued, replay_at.
+ * The guest proves the stand in its vTPM; it has to be at least the last
+ * confirmed one (never "exactly the last issued": a lost answer leaves the
+ * previous one in the vTPM) and at most the last issued one.
  */
 typedef struct {
   char nvName[80];
@@ -162,24 +332,19 @@ typedef struct {
 
 static replay_t storeReplay(const char *hostData) {
 
-  char key[160];
   replay_t stand = {0};
-
-  text_t at = TEXT`replay/${hostData}`;
-  at.into(key, sizeof key);
-
-  bao_entry_t entry = baoRead(key);
+  entry_t entry = storeGet("vtpm", hostData);
 
   stand.failed = entry.failed;
-  stand.found = entry.found;
 
   if (entry.found) {
     json_t p = entry.payload();
-    text_t name = TEXT`${p.get("nv_name").text() ?: ""}`;
+    text_t name = TEXT`${p.get("replay_nv").text() ?: ""}`;
     name.into(stand.nvName, sizeof stand.nvName);
-    stand.confirmed = p.get("confirmed").number();
-    stand.issued = p.get("issued").number();
-    stand.at = p.get("at").number();
+    stand.found = stand.nvName[0] != 0;
+    stand.confirmed = p.get("replay_confirmed").number();
+    stand.issued = p.get("replay_issued").number();
+    stand.at = p.get("replay_at").number();
     entry.release();
   }
 
@@ -210,20 +375,33 @@ typedef struct {
   long next;
 } replay_step_t;
 
+static void statePutInt(yyjson_mut_doc *doc, yyjson_mut_val *root, const char *key, long value) {
+  yyjson_mut_obj_remove_str(root, key);
+  yyjson_mut_obj_put(root, yyjson_mut_str(doc, key), yyjson_mut_sint(doc, value));
+}
+
+static void statePutText(yyjson_mut_doc *doc, yyjson_mut_val *root, const char *key, const char *value) {
+  yyjson_mut_obj_remove_str(root, key);
+  yyjson_mut_obj_put(root, yyjson_mut_str(doc, key), yyjson_mut_strcpy(doc, value));
+}
+
 static bool replayStep(yyjson_mut_doc *doc, yyjson_mut_val *root, void *with) {
 
   replay_step_t *step = (replay_step_t *)with;
-  yyjson_mut_val *confirmed = yyjson_mut_obj_get(root, "confirmed");
+  yyjson_mut_val *confirmed = yyjson_mut_obj_get(root, "replay_confirmed");
+
+  /* the entry is made with the binding; one that is not there is not made here */
+  if (yyjson_mut_obj_size(root) == 0)
+    return false;
 
   /* someone confirmed a later stand since we checked */
   if (confirmed != NULL && yyjson_mut_get_sint(confirmed) > step->seen)
     return false;
 
-  yyjson_mut_obj_put(root, yyjson_mut_str(doc, "nv_name"), yyjson_mut_strcpy(doc, step->nvName));
-  yyjson_mut_obj_put(root, yyjson_mut_str(doc, "confirmed"), yyjson_mut_sint(doc, step->seen));
-  yyjson_mut_obj_put(root, yyjson_mut_str(doc, "issued"), yyjson_mut_sint(doc, step->next));
-  yyjson_mut_obj_remove_str(root, "at");
-  yyjson_mut_obj_put(root, yyjson_mut_str(doc, "at"), yyjson_mut_sint(doc, (int64_t)time(NULL)));
+  statePutText(doc, root, "replay_nv", step->nvName);
+  statePutInt(doc, root, "replay_confirmed", step->seen);
+  statePutInt(doc, root, "replay_issued", step->next);
+  statePutInt(doc, root, "replay_at", (long)time(NULL));
 
   return true;
 }
@@ -234,10 +412,25 @@ static bool storeReplayConfirm(const char *hostData, const char *nvName, long se
   char key[160];
   replay_step_t step = {nvName, seen, next};
 
-  text_t at = TEXT`replay/${hostData}`;
+  text_t at = TEXT`vtpm/${hostData}`;
   at.into(key, sizeof key);
 
-  return baoEdit(key, replayStep, &step);
+  return stateEdit(key, replayStep, &step);
+}
+
+/** The customer's reset: the next release starts the stand anew. */
+static bool storeReplayReset(const char *hostData) {
+
+  char key[160];
+
+  text_t at = TEXT`vtpm/${hostData}`;
+  at.into(key, sizeof key);
+
+  json_t reset = {replay_nv: NULL, replay_confirmed: NULL, replay_issued: NULL, replay_at: NULL};
+  bool done = statePatch(key, reset);
+  reset.release();
+
+  return done;
 }
 
 /* ------------------------------------------------------------- EK binding */
@@ -246,38 +439,39 @@ static bool storeReplayConfirm(const char *hostData, const char *nvName, long se
  * vtpm/<host_data>.ek: the persistent vTPM's EK, pinned on the first release.
  * Another one means its state was lost or swapped, or SVSM fell back to an
  * ephemeral vTPM; nothing is released until the customer unbinds it.
+ *
+ * 1 with the EK in `ek` ("" when none is pinned yet), 0 when the VM has no
+ * vTPM entry at all, -1 when the state cannot be read.
  */
-static bool storeEk(const char *hostData, char *ek, size_t room) {
+static int storeEk(const char *hostData, char *ek, size_t room) {
 
-  char key[160];
-
-  text_t at = TEXT`vtpm/${hostData}`;
-  at.into(key, sizeof key);
-
-  bao_entry_t entry = baoRead(key);
+  entry_t entry = storeGet("vtpm", hostData);
 
   ek[0] = 0;
 
-  if (entry.found) {
-    text_t got = TEXT`${entry.payload().get("ek").text() ?: ""}`;
-    got.into(ek, room);
-    entry.release();
-  }
+  if (entry.failed)
+    return -1;
 
-  return !entry.failed;
+  if (!entry.found)
+    return 0;
+
+  text_t got = TEXT`${entry.payload().get("ek").text() ?: ""}`;
+  got.into(ek, room);
+  entry.release();
+
+  return 1;
 }
 
 static bool ekPin(yyjson_mut_doc *doc, yyjson_mut_val *root, void *with) {
 
   yyjson_mut_val *ek = yyjson_mut_obj_get(root, "ek");
 
-  /* already bound, to this one or another: nothing to do here */
-  if (ek != NULL && yyjson_mut_get_len(ek) > 0)
+  /* no entry: not made here. Already bound, to this one or another: nothing to do */
+  if (yyjson_mut_obj_size(root) == 0 || (ek != NULL && yyjson_mut_get_len(ek) > 0))
     return false;
 
-  yyjson_mut_obj_remove_str(root, "ek");
-  yyjson_mut_obj_put(root, yyjson_mut_str(doc, "ek"), yyjson_mut_strcpy(doc, (const char *)with));
-  yyjson_mut_obj_put(root, yyjson_mut_str(doc, "ek_first"), yyjson_mut_sint(doc, (int64_t)time(NULL)));
+  statePutText(doc, root, "ek", (const char *)with);
+  statePutInt(doc, root, "ek_first", (long)time(NULL));
 
   return true;
 }
@@ -289,10 +483,10 @@ static void storePinEk(const char *hostData, const char *ek) {
   text_t at = TEXT`vtpm/${hostData}`;
   at.into(key, sizeof key);
 
-  baoEdit(key, ekPin, (void *)ek);
+  stateEdit(key, ekPin, (void *)ek);
 }
 
-/** The customer's decision that the vTPM may be a new one. */
+/** The customer's decision that the vTPM may be a new one: EK and replay stand anew. */
 static bool storeUnbindEk(const char *hostData) {
 
   char key[160];
@@ -300,8 +494,9 @@ static bool storeUnbindEk(const char *hostData) {
   text_t at = TEXT`vtpm/${hostData}`;
   at.into(key, sizeof key);
 
-  json_t unbind = meta_toJSON("{\"ek\":null,\"ek_first\":null}");
-  bool done = baoPatch(key, unbind);
+  json_t unbind = {ek: NULL, ek_first: NULL, replay_nv: NULL, replay_confirmed: NULL,
+                   replay_issued: NULL, replay_at: NULL};
+  bool done = statePatch(key, unbind);
   unbind.release();
 
   return done;

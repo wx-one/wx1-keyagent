@@ -511,8 +511,8 @@ static const char *tabOf(http_request_t *req, const tab_t *list, int n) {
 static http_response_t pageEnd(http_request_t *req, buf_t *out) {
 
   buf_t__put(out, "</div></main><footer class=foot><div class=wrap><span>wx1 Keyagent " WX_VERSION
-                  " · läuft bei dir, nicht beim Provider</span><span>Schlüssel und Bindungen liegen "
-                  "in deinem OpenBao</span></div></footer></body></html>");
+                  " · läuft bei dir, nicht beim Provider</span><span>Schlüssel in deinem "
+                  "Schlüsselspeicher, signierte Bindungen in deiner Datenbank</span></div></footer></body></html>");
 
   static buf_t page;
   buf_t__reset(&page);
@@ -844,7 +844,7 @@ static void requestCard(buf_t *out, http_request_t *req, PGresult *r, int row, s
     text_t vd = TEXT`vm-${p.get("vm_uuid").text()}`;
     vd.into(vmDisk, sizeof vmDisk);
     if (p.get("vm_name").text()[0] == 0 && isDiskId(vmDisk)) {
-      bao_entry_t att = storeGet("attachments", vmDisk);
+      entry_t att = storeGet("attachments", vmDisk);
       if (att.found) {
         text_t n = TEXT`${att.payload().get("vm_name").text()}`;
         n.into(name, sizeof name);
@@ -1094,8 +1094,8 @@ static const char *const modes[][3] = {
 
 static void diskRow(buf_t *out, http_request_t *req, const char *id, settings_t *settings, bool system) {
 
-  bao_entry_t disk = storeGet("disks", id);
-  bao_entry_t att = storeGet("attachments", id);
+  entry_t disk = storeGet("disks", id);
+  entry_t att = storeGet("attachments", id);
   json_t d = disk.payload(), a = att.payload();
   const char *status = disk.found ? d.get("status").text() : "?";
   const char *mode = d.get("mode").text();
@@ -1219,7 +1219,7 @@ static int countPrefix(json_t ids, const char *prefix) {
 /** The VM a disk belongs to, by name, or the disk ID cut short. */
 static void diskOwner(buf_t *out, const char *diskId) {
 
-  bao_entry_t att = storeGet("attachments", diskId);
+  entry_t att = storeGet("attachments", diskId);
 
   if (att.found && att.payload().get("vm_name").text()[0] != 0) {
     buf_t__put(out, "<b>");
@@ -1291,7 +1291,7 @@ static void leaseTable(buf_t *out, http_request_t *req, settings_t *settings) {
 
 static void vtpmRow(buf_t *out, http_request_t *req, const char *hd) {
 
-  bao_entry_t v = storeGet("vtpm", hd);
+  entry_t v = storeGet("vtpm", hd);
   replay_t stand = storeReplay(hd);
   json_t e = v.payload();
 
@@ -1341,8 +1341,7 @@ static http_response_t uiDisks(http_request_t *req) {
   buf_t out = {0};
   settings_t settings = settingsRead();
   bool failed = false;
-  json_t disks = baoList("disks/", &failed);
-  json_t ids = disks.get("data").get("keys");
+  json_t ids = stateList("disks/", &failed);
 
   long live = 0;
   {
@@ -1362,13 +1361,14 @@ static http_response_t uiDisks(http_request_t *req) {
 
   pageStart(&out, "Disks & VMs", "/disks");
   pageHead(&out, "Disks &amp; VMs",
-           "Jede Disk hat einen eigenen Schlüssel in deinem OpenBao. Er geht nur an die VM, an die sie "
-           "gebunden ist, auf Hosts, die du freigegeben hast, mit einer Bootkette, die du kennst.");
+           "Jede Disk hat einen eigenen Schlüssel in deinem Schlüsselspeicher, und er verlässt ihn nur "
+           "verpackt für die VM, an die sie gebunden ist, auf Hosts, die du freigegeben hast, mit einer "
+           "Bootkette, die du kennst.");
   tabs(&out, "/disks", tab, list, 3);
 
   if (failed)
-    buf_t__put(&out, "<ul class=notes><li class=bad><span>OpenBao ist nicht erreichbar, die Disks "
-                     "können gerade nicht angezeigt werden.</span></li></ul>");
+    buf_t__put(&out, "<ul class=notes><li class=bad><span>Die Datenbank oder der Schlüsselspeicher ist "
+                     "nicht erreichbar, die Disks können gerade nicht angezeigt werden.</span></li></ul>");
 
   if (strcmp(tab, "disks") == 0) {
 
@@ -1396,8 +1396,7 @@ static http_response_t uiDisks(http_request_t *req) {
 
   } else {
 
-    json_t vtpms = baoList("vtpm/", &failed);
-    json_t hds = vtpms.get("data").get("keys");
+    json_t hds = stateList("vtpm/", &failed);
 
     buf_t__put(&out, "<div class=card><h2>Persistenter vTPM</h2><p class=lead>Der Zustand des vTPM einer VM "
                      "ist mit einem Schlüssel verschlüsselt, der nur hier liegt und nur an den SVSM genau "
@@ -1417,10 +1416,10 @@ static http_response_t uiDisks(http_request_t *req) {
     }
 
     buf_t__put(&out, "</div>");
-    vtpms.release();
+    hds.release();
   }
 
-  disks.release();
+  ids.release();
   settings.release();
 
   return pageEnd(req, &out);
@@ -1705,8 +1704,8 @@ static http_response_t uiSettings(http_request_t *req) {
   tabs(&out, "/settings", tab, list, 5);
 
   if (settings.failed)
-    buf_t__put(&out, "<ul class=notes><li class=bad><span>OpenBao ist nicht erreichbar, die Einstellungen "
-                     "können gerade nicht gelesen werden.</span></li></ul>");
+    buf_t__put(&out, "<ul class=notes><li class=bad><span>Die Datenbank oder der Schlüsselspeicher ist "
+                     "nicht erreichbar, die Einstellungen können gerade nicht gelesen werden.</span></li></ul>");
 
   if (strcmp(tab, "automatik") == 0) {
 
@@ -1960,7 +1959,6 @@ static http_response_t uiVtpmReset(http_request_t *req) {
 
   if (isHex(hd, 64)) {
     storeUnbindEk(hd);
-    storeDrop("replay", hd);
   }
 
   http_response_t back = uiBack(req, &form, "/disks?tab=vtpm");
@@ -1986,7 +1984,7 @@ static http_response_t uiPcrRef(http_request_t *req) {
   pcr_ref_t ref = {{form.get("p4"), form.get("p8"), form.get("p9")}, label};
 
   if (isHex(ref.value[0], 64) && isHex(ref.value[1], 64) && isHex(ref.value[2], 64))
-    baoEdit("settings", addPcrRef, &ref);
+    stateEdit("settings", addPcrRef, &ref);
 
   http_response_t back = uiBack(req, &form, "/settings?tab=bootketten");
   form.release();
@@ -2028,7 +2026,7 @@ static http_response_t uiPcrRefRemove(http_request_t *req) {
   pcr_ref_t ref = {{form.get("p4"), form.get("p8"), form.get("p9")}, ""};
 
   if (isHex(ref.value[0], 64) && isHex(ref.value[1], 64) && isHex(ref.value[2], 64))
-    baoEdit("settings", removePcrRef, &ref);
+    stateEdit("settings", removePcrRef, &ref);
 
   http_response_t back = uiBack(req, &form, "/settings?tab=bootketten");
   form.release();

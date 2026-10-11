@@ -3,8 +3,8 @@
  * a VM", "allow another host", ... with public data only (initdata,
  * cloud-init, chip_id). They are checked here, approved by the customer or an
  * auto rule, and only then do keys and bindings appear in the customer's
- * OpenBao and KBS policy. The provider sees "applied" or "rejected", never a
- * key.
+ * key store, state and KBS policy. The provider sees "applied" or "rejected",
+ * never a key.
  *
  * Taking rights away (detach) applies at once; giving them needs an approval
  * or a rule.
@@ -128,13 +128,13 @@ static const char *releaseGuestUrl(void) {
 /* --------------------------------------------------------------- settings */
 
 /**
- * settings in OpenBao: auto_attach, auto_add_host, host_pool
+ * settings (store.h): auto_attach, auto_add_host, host_pool
  * [{hv_uuid, chip_id, name}], allowed_ssh_keys [...]. The HV UUID comes from
  * the provider and only names a host; what counts is the chip_id, signed by
  * AMD into every report.
  */
 typedef struct {
-  bao_entry_t entry;
+  entry_t entry;
   json_t data;
   bool failed;
 } settings_t;
@@ -340,8 +340,8 @@ static bool validate(checks_t *checks, const char *type, json_t p) {
   char diskBuf[48];
   settings_t settings = settingsRead();
   const char *diskId = diskOf(type, p, diskBuf);
-  bao_entry_t disk = storeGet("disks", diskId);
-  bao_entry_t att = storeGet("attachments", diskId);
+  entry_t disk = storeGet("disks", diskId);
+  entry_t att = storeGet("attachments", diskId);
   bool active = disk.found && strcmp(disk.payload().get("status").text() ?: "", "active") == 0;
   const char *attachedTo = att.found ? att.payload().get("vm_uuid").text() : NULL;
   const char *chip = p.get("chip_id").text();
@@ -349,7 +349,7 @@ static bool validate(checks_t *checks, const char *type, json_t p) {
   bool automatic = false;
   char hostData[65];
 
-  if (!checks.ok(!settings.failed && !disk.failed && !att.failed, "state readable (OpenBao)"))
+  if (!checks.ok(!settings.failed && !disk.failed && !att.failed, "state readable"))
     goto done;
 
   /* HV UUID (from the provider) and chip_id (from the report) have to agree
@@ -392,7 +392,7 @@ static bool validate(checks_t *checks, const char *type, json_t p) {
     char vmDisk[48];
     text_t vd = TEXT`vm-${p.get("vm_uuid").text()}`;
     vd.into(vmDisk, sizeof vmDisk);
-    bao_entry_t vm = storeGet("attachments", vmDisk);
+    entry_t vm = storeGet("attachments", vmDisk);
 
     if (boot) {
       /* the VM's main disk: once booted from, it is encrypted and never
@@ -457,7 +457,7 @@ done:
 
 /**
  * What a request that passed its checks says when another one, decided at
- * the same moment, got there first. The check-and-set in OpenBao is what
+ * the same moment, got there first. The check-and-set on the state is what
  * decides; losing that race is a refusal, not a failure of the agent.
  */
 static const char lostTaken[] = "disk ID is taken";
@@ -466,52 +466,6 @@ static const char lostDeleting[] = "disk is being deleted";
 
 static bool lostRace(const char *wrong) {
   return wrong == lostTaken || wrong == lostAttached || wrong == lostDeleting;
-}
-
-/** A new entry, written only if there is none yet; `*taken` if there was. */
-static bool baoCreate(const char *key, json_t entry, bool *taken) {
-
-  char *json = entry.owned();
-  bool conflict = false;
-  bool written = json != NULL && baoWrite(key, json, 0, &conflict);
-
-  free(json);
-  *taken = conflict;
-
-  return written;
-}
-
-/** A fresh disk key: 32 random bytes, kept as their base64 text - the guests
-    use exactly those 44 characters as the LUKS passphrase. */
-static bool newDiskKey(const char *diskId) {
-
-  unsigned char raw[32];
-  char text[48], path[128];
-
-  if (!randomBytes(raw, sizeof raw))
-    return false;
-
-  toBase64(raw, sizeof raw, text);
-
-  text_t at = TEXT`disk/${diskId}/key`;
-  at.into(path, sizeof path);
-
-  return baoPutKey(path, (const unsigned char *)text, strlen(text));
-}
-
-/** The state key of a persistent vTPM: 32 raw bytes. */
-static bool newVtpmKey(const char *hostData) {
-
-  unsigned char raw[32];
-  char path[128];
-
-  if (!randomBytes(raw, sizeof raw))
-    return false;
-
-  text_t at = TEXT`vtpm/${hostData}/state`;
-  at.into(path, sizeof path);
-
-  return baoPutKey(path, raw, sizeof raw);
 }
 
 /**
@@ -545,8 +499,8 @@ static const char *attach(json_t p, const char *diskId, bool withVtpm) {
   text_t at = TEXT`attachments/${diskId}`;
   at.into(key, sizeof key);
 
-  if (!baoCreate(key, binding, &taken))
-    wrong = taken ? lostAttached : "cannot write the binding (OpenBao)";
+  if (!stateCreate(key, binding, &taken))
+    wrong = taken ? lostAttached : "cannot write the binding (database)";
 
   binding.release();
   free(raw.at);
@@ -561,15 +515,13 @@ static const char *attach(json_t p, const char *diskId, bool withVtpm) {
   text_t vt = TEXT`vtpm/${hostData}`;
   vt.into(key, sizeof key);
 
-  bool made = baoCreate(key, vtpm, &taken);
+  bool made = stateCreate(key, vtpm, &taken);
   vtpm.release();
 
-  if (made) {
-    if (!newVtpmKey(hostData))
-      wrong = "cannot write the vTPM state key (OpenBao)";
-  } else if (!taken) {
-    wrong = "cannot write the vTPM entry (OpenBao)";
-  }
+  if (made)
+    wrong = kbsNewVtpmKey(hostData);
+  else if (!taken)
+    wrong = "cannot write the vTPM entry (database)";
 
   return wrong;
 }
@@ -593,9 +545,9 @@ static bool addChip(yyjson_mut_doc *doc, yyjson_mut_val *root, void *with) {
   return yyjson_mut_arr_add_strcpy(doc, chips, chip);
 }
 
-/** A vTPM's state key overwritten, its entry and replay stand gone. */
+/** A vTPM's state key overwritten in the KBS, its entry (EK, replay stand) gone. */
 static bool shredVtpm(const char *hostData) {
-  return newVtpmKey(hostData) && storeDrop("vtpm", hostData) && storeDrop("replay", hostData);
+  return kbsNewVtpmKey(hostData) == NULL && storeDrop("vtpm", hostData);
 }
 
 /**
@@ -604,27 +556,27 @@ static bool shredVtpm(const char *hostData) {
  */
 static const char *reprovision(json_t p, const char *diskId) {
 
-  bao_entry_t att = storeGet("attachments", diskId);
+  entry_t att = storeGet("attachments", diskId);
   char oldHd[80];
   text_t t = TEXT`${att.found ? att.payload().get("host_data").text() : ""}`;
   t.into(oldHd, sizeof oldHd);
   att.release();
 
-  if (!newDiskKey(diskId))
-    return "cannot overwrite the disk key (OpenBao)";
+  if (!keyNew(diskId))
+    return "cannot replace the disk key (key store)";
 
   if (isHex(oldHd, 64) && !shredVtpm(oldHd))
-    return "cannot shred the old vTPM state (OpenBao)";
+    return "cannot shred the old vTPM state (KBS)";
 
   if (!storeDrop("attachments", diskId))
-    return "cannot remove the old binding (OpenBao)";
+    return "cannot remove the old binding (database)";
 
   storeResetLease(diskId);
 
   return attach(p, diskId, true);
 }
 
-/** Crypto-shredding: the keys are overwritten (KV v1 keeps no versions). */
+/** Crypto-shredding: the disk key destroyed in the key store, the vTPM state keys overwritten. */
 static const char *deleteDisk(const char *diskId) {
 
   bool failed = false;
@@ -633,10 +585,10 @@ static const char *deleteDisk(const char *diskId) {
   bool marked = storeSet("disks", diskId, {status: "deleting"});
 
   if (!marked)
-    return "cannot mark the disk (OpenBao)";
+    return "cannot mark the disk (database)";
 
   /* an attach racing this one sees "deleting"; this one sees its binding */
-  bao_entry_t att = storeGet("attachments", diskId);
+  entry_t att = storeGet("attachments", diskId);
   bool attached = att.found || att.failed;
   att.release();
 
@@ -645,11 +597,10 @@ static const char *deleteDisk(const char *diskId) {
     return "disk is attached to a VM";
   }
 
-  if (!newDiskKey(diskId))
-    return "cannot overwrite the disk key (OpenBao)";
+  if (!keyShred(diskId))
+    return "cannot shred the disk key (key store)";
 
-  json_t keys = baoList("vtpm/", &failed);
-  json_t list = keys.get("data").get("keys");
+  json_t list = stateList("vtpm/", &failed);
 
   for (int i = 0; !failed && i < list.count(); ++i) {
 
@@ -657,7 +608,7 @@ static const char *deleteDisk(const char *diskId) {
     text_t name = TEXT`${list.at(i).text() ?: ""}`;
     name.into(hd, sizeof hd);
 
-    bao_entry_t v = storeGet("vtpm", hd);
+    entry_t v = storeGet("vtpm", hd);
     bool ours = v.found && strcmp(v.payload().get("disk_id").text() ?: "", diskId) == 0;
     v.release();
 
@@ -665,13 +616,13 @@ static const char *deleteDisk(const char *diskId) {
       continue;
 
     if (!shredVtpm(hd))
-      wrong = "cannot shred a vTPM state key (OpenBao)";
+      wrong = "cannot shred a vTPM state key (KBS)";
   }
 
-  keys.release();
+  list.release();
 
   if (failed)
-    return "cannot list the vTPMs (OpenBao)";
+    return "cannot list the vTPMs (database)";
 
   if (wrong == NULL) {
     storeSet("disks", diskId, {status: "deleted"});
@@ -719,15 +670,15 @@ static const char *apply(const char *type, json_t p) {
     text_t at = TEXT`disks/${diskId}`;
     at.into(key, sizeof key);
 
-    bool made = baoCreate(key, entry, &taken);
+    bool made = stateCreate(key, entry, &taken);
     entry.release();
 
     if (!made)
-      return taken ? lostTaken : "cannot write the disk (OpenBao)";
+      return taken ? lostTaken : "cannot write the disk (database)";
 
-    /* the key is made here, at the customer's, and goes only into their OpenBao */
-    if (!newDiskKey(diskId))
-      return "cannot write the disk key (OpenBao)";
+    /* the key is made at the customer's, in their key store, and stays there */
+    if (!keyNew(diskId))
+      return "cannot make the disk key (key store)";
 
     if (system && (wrong = attach(p, diskId, true)) != NULL)
       return wrong;
@@ -735,7 +686,7 @@ static const char *apply(const char *type, json_t p) {
     bool done = storeSet("disks", diskId, {status: "active"});
 
     if (!done)
-      return "cannot mark the disk active (OpenBao)";
+      return "cannot mark the disk active (database)";
 
   } else if (strcmp(type, "attach") == 0) {
 
@@ -750,7 +701,7 @@ static const char *apply(const char *type, json_t p) {
     }
 
     /* a delete racing this one: whoever comes second sees the other */
-    bao_entry_t disk = storeGet("disks", diskId);
+    entry_t disk = storeGet("disks", diskId);
     bool active = disk.found && strcmp(disk.payload().get("status").text() ?: "", "active") == 0;
     disk.release();
 
@@ -764,12 +715,12 @@ static const char *apply(const char *type, json_t p) {
     text_t at = TEXT`attachments/${diskId}`;
     at.into(key, sizeof key);
 
-    baoEdit(key, addChip, (void *)(p.get("chip_id").text() ?: ""));
+    stateEdit(key, addChip, (void *)(p.get("chip_id").text() ?: ""));
 
   } else if (strcmp(type, "detach") == 0) {
 
     if (!storeDrop("attachments", diskId))
-      return "cannot remove the binding (OpenBao)";
+      return "cannot remove the binding (database)";
 
     storeResetLease(diskId);
 

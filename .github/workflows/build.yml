@@ -49,7 +49,8 @@ jobs:
 
   image:
     # the release on the hardened Debian 13 seed of container.gov.de, tested
-    # with the whole of test/api.sh against CockroachDB, OpenBao and a KBS stub
+    # with the whole of test/api.sh against CockroachDB, OpenBao and a KBS stub;
+    # and the release once more with a SoftHSM2 token instead of OpenBao
     needs: build
     runs-on: ubuntu-24.04
     permissions:
@@ -68,6 +69,8 @@ jobs:
           docker build -q -f ci/Dockerfile.release --build-arg RELEASE="$release" -t wx1-keyagent:ci out
       - name: test/api.sh against the image
         run: RACE_ROUNDS=20 IMAGE=wx1-keyagent:ci NO_BUILD=1 test/local.sh
+      - name: test/api.sh with an HSM as the key store (SoftHSM2 over PKCS#11)
+        run: KEYSTORE=pkcs11 NO_BUILD=1 test/local.sh
       - name: image SBOM
         run: |
           sudo apt-get install -y -qq jq >/dev/null

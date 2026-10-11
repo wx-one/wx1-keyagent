@@ -1,6 +1,10 @@
 /**
- * The customer's KBS resource policy, written from the bindings in OpenBao
- * and set through the KBS admin API after every change to them.
+ * The customer's KBS: its resource policy, written from the bindings and set
+ * through the KBS admin API after every change to them, and the vTPM state
+ * keys, which the agent makes and the KBS alone gives out - to the SVSM of
+ * exactly that VM. Where the KBS keeps them is the KBS's configuration
+ * (on OpenBao's kv/, in a KMS, on its disk); the agent writes them through
+ * the same API either way and never reads them back.
  *
  * The verifier is patched not to enforce the VMPL itself: it is checked here.
  */
@@ -118,19 +122,20 @@ static int refMeasurements(buf_t *out, const char *const *keys, int keyCount) {
 static bool policyDisks(buf_t *out) {
 
   bool failed = false;
-  json_t keys = baoList("attachments/", &failed);
-  json_t list = keys.get("data").get("keys");
+  json_t list = stateList("attachments/", &failed);
   int written = 0;
 
-  if (failed)
+  if (failed) {
+    list.release();
     return false;
+  }
 
   buf_t__put(out, "{");
 
   for (int i = 0; i < list.count(); ++i) {
 
     const char *id = list.at(i).text();
-    bao_entry_t att = storeGet("attachments", id ?: "");
+    entry_t att = storeGet("attachments", id ?: "");
 
     if (att.failed) {
       failed = true;
@@ -158,18 +163,78 @@ static bool policyDisks(buf_t *out) {
   }
 
   buf_t__put(out, "\n}");
-  keys.release();
+  list.release();
 
   return !failed;
+}
+
+/**
+ * A write to the KBS admin API: `path` below /kbs/v0/, the body as given.
+ * NULL, or what went wrong (`what` names it).
+ */
+static const char *kbsAdmin(const char *path, const char *mime, const void *body, size_t length,
+                            const char *what) {
+
+  static char token[256], why[160];
+  char url[512], bearer[300];
+
+  if (!readSecret(env("WX_KBS_ADMIN_TOKEN_FILE", "/secrets/kbs-admin-token"), token, sizeof token))
+    return "no KBS admin token";
+
+  text_t at = TEXT`${env("WX_KBS_ADMIN_URL", "http://127.0.0.1:8090")}/kbs/v0/${path}`;
+  at.into(url, sizeof url);
+  text_t auth = TEXT`Bearer ${token}`;
+  auth.into(bearer, sizeof bearer);
+
+  fetch_answer_t got = meta_fetch("POST", url)
+                           .header("authorization", bearer)
+                           .header("content-type", mime)
+                           .bytes(body, length)
+                           .send();
+
+  const char *wrong = NULL;
+
+  if (got.status == 0) {
+    wrong = "KBS not reachable";
+  } else if (!got.ok) {
+    snprintf(why, sizeof why, "KBS refused %s (%d)", what, got.status);
+    wrong = why;
+  }
+
+  got.release();
+
+  return wrong;
+}
+
+/**
+ * A new state key for the VM's vTPM, overwriting one it had: the old state
+ * cannot be read any more. NULL, or what went wrong.
+ */
+static const char *kbsNewVtpmKey(const char *hostData) {
+
+  unsigned char raw[32];
+  char path[128];
+
+  if (!isHex(hostData, 64))
+    return "bad HOST_DATA";
+
+  if (!randomBytes(raw, sizeof raw))
+    return "no randomness";
+
+  text_t at = TEXT`resource/vtpm/${hostData}/state`;
+  at.into(path, sizeof path);
+
+  const char *wrong = kbsAdmin(path, "application/octet-stream", raw, sizeof raw, "the vTPM state key");
+  OPENSSL_cleanse(raw, sizeof raw);
+
+  return wrong;
 }
 
 /** Writes the policy and sets it in the KBS; NULL, or what went wrong. */
 static const char *pushPolicy(void) {
 
   static const char *const both[] = {"igvm_measurement", "igvm_persist_measurement"};
-  static char token[256];
   buf_t policy = {0}, body = {0};
-  const char *wrong = NULL;
 
   buf_t__put(&policy, policyHead);
   refMeasurements(&policy, both, 2);
@@ -177,7 +242,7 @@ static const char *pushPolicy(void) {
 
   if (!policyDisks(&policy)) {
     free(policy.at);
-    return "cannot read the bindings (OpenBao)";
+    return "cannot read the bindings (database)";
   }
 
   buf_t__put(&policy, policyTail);
@@ -185,12 +250,6 @@ static const char *pushPolicy(void) {
   if (policy.broke) {
     free(policy.at);
     return "no memory";
-  }
-
-  if (!readSecret(env("WX_KBS_ADMIN_TOKEN_FILE", "/secrets/kbs-admin-token"), token,
-                  sizeof token)) {
-    free(policy.at);
-    return "no KBS admin token";
   }
 
   /* base64url without padding, as the KBS wants it */
@@ -212,18 +271,9 @@ static const char *pushPolicy(void) {
   free(encoded);
   free(policy.at);
 
-  char url[512], bearer[300];
-  text_t at = TEXT`${env("WX_KBS_ADMIN_URL", "http://127.0.0.1:8090")}/kbs/v0/resource-policy`;
-  at.into(url, sizeof url);
-  text_t auth = TEXT`Bearer ${token}`;
-  auth.into(bearer, sizeof bearer);
-
-  fetch_answer_t got = meta_fetch("POST", url).header("authorization", bearer).json(body.at).send();
-
-  if (!got.ok)
-    wrong = got.status == 0 ? "KBS not reachable" : "KBS refused the policy";
-
-  got.release();
+  const char *wrong = body.broke ? "no memory"
+                                 : kbsAdmin("resource-policy", "application/json", body.at, body.length,
+                                            "the policy");
   free(body.at);
 
   return wrong;

@@ -1,0 +1,23 @@
+# The agent with a SoftHSM2 token as its key store, for test/local.sh
+# (KEYSTORE=pkcs11). Not the release image: that one has no package manager,
+# and a customer brings the module of their own HSM instead. SoftHSM2 does
+# RSA-OAEP with SHA-1 only, hence WX_PKCS11_OAEP=sha1.
+#
+#   docker build -f test/Dockerfile.softhsm --build-arg RELEASE=<name> -t wx/wx1-keyagent-softhsm out
+FROM debian:trixie-20260918@sha256:9cc080028c43b27d2074d63a5f9caf7166d731494965616c1a6d2827a004585c
+ARG RELEASE
+RUN apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
+      softhsm2 opensc ca-certificates >/dev/null && rm -rf /var/lib/apt/lists/*
+ADD ${RELEASE}.tar.gz /opt/
+# as the release image runs: one user for nginx's master and its workers, who
+# must all read the token
+RUN ln -s /opt/${RELEASE} /opt/wx1-keyagent && mkdir -p /var/lib/softhsm/tokens /var/lib/wx1-keyagent && \
+    chown -R 65534:65534 /var/lib/softhsm /var/lib/wx1-keyagent && \
+    printf 'directories.tokendir = /var/lib/softhsm/tokens\nobjectstore.backend = file\nlog.level = ERROR\n' \
+      > /etc/softhsm2.conf && \
+    printf '#!/bin/sh\nset -e\nsofthsm2-util --show-slots | grep -q "Label: *wx1" || \\\n  softhsm2-util --init-token --free --label wx1 --pin "$(cat /secrets/pkcs11-pin)" --so-pin 87654321 >/dev/null\nexec /opt/wx1-keyagent/bin/wx1-keyagent\n' \
+      > /usr/local/bin/start && chmod +x /usr/local/bin/start
+ENV SOFTHSM2_CONF=/etc/softhsm2.conf WX_KEYSTORE=pkcs11 WX_PKCS11_MODULE=/usr/lib/softhsm/libsofthsm2.so \
+    WX_PKCS11_TOKEN=wx1 WX_PKCS11_ENV=SOFTHSM2_CONF WX_PKCS11_OAEP=sha1
+USER 65534:65534
+ENTRYPOINT ["/usr/local/bin/start"]

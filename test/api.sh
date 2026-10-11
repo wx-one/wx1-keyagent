@@ -1,14 +1,21 @@
 #!/bin/bash
 # The request API against a running agent (test/local.sh starts one):
-# tokens, checks, auto rules, system disks and volumes, races, shredding.
+# tokens, checks, auto rules, system disks and volumes, races, shredding,
+# and the takeover of an installation of 0.0.5.
 #
-#   WX_API           the agent's API, e.g. http://127.0.0.1:8095
-#   WX_BAO           the OpenBao container (dev mode, root token "root")
-#   WX_DB_CONTAINER  the CockroachDB container
-#   WX_POLICY        where the KBS stub writes the policy it was given
-#   WX_TLS           with TLS: the directory with ca.pem and the client certificates
+#   WX_API              the agent's API, e.g. http://127.0.0.1:8095
+#   WX_KEYSTORE         openbao or pkcs11: where the disk keys are looked for
+#   WX_BAO              the OpenBao container (dev mode, root token "root")
+#   WX_BAO_AGENT_TOKEN  the file with the agent's own OpenBao token
+#   WX_AGENT_CONTAINER  the agent's container (pkcs11: its token is looked into there)
+#   WX_DB_CONTAINER     the CockroachDB container
+#   WX_POLICY           where the KBS stub writes the policy it was given
+#   WX_KBS_OUT          where it writes the resources (the vTPM state keys)
+#   WX_TLS              with TLS: the directory with ca.pem and the client certificates
+#   LEGACY_*            what test/local.sh left in OpenBao the way 0.0.5 kept it
 set -uo pipefail
 A=${WX_API:?} BAO=${WX_BAO:?} DBC=${WX_DB_CONTAINER:?} POLICY=${WX_POLICY:?}
+KS=${WX_KEYSTORE:-openbao} KBSOUT=${WX_KBS_OUT:?} AGENT=${WX_AGENT_CONTAINER:?}
 T=${WX_TLS:-}
 CA=() CPC=()
 [ -n "$T" ] && CA=(--cacert "$T/ca.pem") && CPC=(--cert "$T/cp.pem" --key "$T/cp.key")
@@ -26,6 +33,43 @@ sql() { docker exec "$DBC" cockroach sql --insecure -d keyagent --format=tsv -e 
 cp_() { curl -s "${CA[@]}" "${CPC[@]}" -H "Authorization: Bearer ${TOKEN:-cp-secret}" -H 'content-type: application/json' "$@"; }
 cu() { curl -s "${CA[@]}" -H "Authorization: Bearer customer-secret" -H 'content-type: application/json' "$@"; }
 uuid() { cat /proc/sys/kernel/random/uuid; }
+
+# the state: one field of an entry, and whether it is there
+field() { sql "select data::JSONB->>'$2' from state where key = '$1'"; }
+there() { [ "$(sql "select count(*) from state where key = '$1'")" = 1 ] && echo yes || echo no; }
+# a vTPM state key as the KBS got it, in hex; empty when it has none
+vtpmKey() { [ -f "$KBSOUT/vtpm/$1/state" ] && xxd -p -c 64 "$KBSOUT/vtpm/$1/state"; }
+
+# A disk key: with OpenBao, wrapped for a key of the test's own and opened
+# here as the guest's client opens it (RSA-OAEP, then AES-KWP) - its 32 bytes
+# in hex, empty when there is none. A PKCS#11 token gives nothing out:
+# "there" when the token has the key.
+openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:3072 -out "$W/guest.pem" 2>/dev/null
+if [ "$KS" = openbao ]; then
+  jq -n --rawfile p <(openssl pkey -in "$W/guest.pem" -pubout) '{public_key: $p, type: "rsa-3072"}' \
+    | bao write transit/keys/wx1-guest-apitest/import - >/dev/null
+fi
+p11() { docker exec "$AGENT" pkcs11-tool --module /usr/lib/softhsm/libsofthsm2.so --token-label wx1 \
+  --login --pin 12345678 "$@" 2>/dev/null; }
+keyOf() {
+  if [ "$KS" = pkcs11 ]; then
+    p11 --list-objects --type secrkey | grep -q "label: *wx1-disk-$1\$" && echo there
+    return
+  fi
+  local w aes
+  w=$(bao read -format=json "transit/byok-export/wx1-guest-apitest/wx1-disk-$1/latest" 2>/dev/null | jq -r '.data.keys[]')
+  [ -n "$w" ] || return 0
+  echo "$w" | base64 -d > "$W/w.bin"
+  head -c 384 "$W/w.bin" > "$W/w.rsa"; tail -c +385 "$W/w.bin" > "$W/w.kwp"
+  aes=$(openssl pkeyutl -decrypt -inkey "$W/guest.pem" -in "$W/w.rsa" -pkeyopt rsa_padding_mode:oaep \
+    -pkeyopt rsa_oaep_md:sha256 -pkeyopt rsa_mgf1_md:sha256 | xxd -p -c 64)
+  openssl enc -d -id-aes256-wrap-pad -K "$aes" -iv A65959A6 -in "$W/w.kwp" | xxd -p -c 64
+}
+KEYRE='^([0-9a-f]{64}|there)$'
+
+# the customer's settings, as the UI's forms write them
+CSRF=$(printf wx-ui-csrf | openssl dgst -sha256 -hmac ui-secret -r | cut -d' ' -f1)
+uiSet() { curl -s "${CA[@]}" -u kunde:ui-secret -o /dev/null -w '%{http_code}' --data-urlencode "csrf=$CSRF" "$@" "$A/settings"; }
 
 # <what> <got> <extended regex it must match>
 expect() {
@@ -61,6 +105,37 @@ decide() { cu -X POST -d "{\"approve\":$2}" "$A/api/customer/requests/$(echo "$1
 
 echo "--- the worker"
 expect "a worker sees the trust store (SSL_CERT_FILE)" "$(curl -s "${CA[@]}" "$A/health")" '"trustStore":"/[^"]+"'
+expect "  and its key store" "$(curl -s "${CA[@]}" "$A/health")" '"keyStore":"(OpenBao|PKCS#11)","keys":true'
+
+if [ -n "${LEGACY_VOL:-}" ]; then
+  echo "--- taking over 0.0.5 (state in wx/, disk keys in kv/)"
+  expect "volume entry" "$(field "disks/$LEGACY_VOL" status)" "^active$"
+  expect "  its key in transit, the same 32 bytes" "$(keyOf "$LEGACY_VOL")" "^$LEGACY_RAW$"
+  expect "  and gone from kv/" "$(bao read "kv/disk/$LEGACY_VOL/key" >/dev/null 2>&1 && echo yes || echo no)" "^no$"
+  expect "shredded volume: entry, no key" "$(field "disks/$LEGACY_DEL" status) $(keyOf "$LEGACY_DEL")" "^deleted $"
+  expect "vTPM entry with its EK" "$(field "vtpm/$LEGACY_HD" ek)" "^$LEGACY_EK$"
+  expect "  and the replay stand in it" \
+    "$(field "vtpm/$LEGACY_HD" replay_confirmed)/$(field "vtpm/$LEGACY_HD" replay_issued)/$(field "vtpm/$LEGACY_HD" replay_nv)" "^5/6/000b00$"
+  expect "  no replay/ entry of its own" "$(there "replay/$LEGACY_HD")" "^no$"
+  expect "marked as done" "$(there meta/openbao-kv-imported)" "^yes$"
+  expect "wx/ left as it was" "$(bao kv get -format=json -mount=wx "disks/$LEGACY_VOL" | jq -r .data.data.status)" "^active$"
+fi
+
+if [ "$KS" = openbao ]; then
+  echo "--- key store: OpenBao"
+  AT=$(cat "${WX_BAO_AGENT_TOKEN:?}")
+  agentBao() { docker exec -i -e BAO_ADDR=http://127.0.0.1:8200 -e BAO_TOKEN="$AT" "$BAO" bao "$@" 2>&1; }
+  probe=wx1-disk-${LEGACY_VOL:-none}
+  expect "the agent's token cannot export a disk key in the clear" "$(agentBao read "transit/export/encryption-key/$probe")" "permission denied"
+  expect "  nor back one up" "$(agentBao read "transit/backup/$probe")" "permission denied"
+  expect "  nor read kv/vtpm/" "$(agentBao read kv/vtpm/x/state)" "permission denied"
+  expect "the start-up checks left no keys behind" \
+    "$(bao list -format=json transit/keys | jq -r '.[]' | grep -E '^wx1-(check|guest)-' | grep -vc apitest)" "^0$"
+else
+  echo "--- key store: PKCS#11 (SoftHSM2)"
+  expect "the state key on the token" "$(p11 --list-objects --type secrkey | grep -c 'label: *wx1-state$')" "^1$"
+  expect "  never extractable" "$(p11 --list-objects --type secrkey | grep -A6 'label: *wx1-state$' | grep -c 'never extractable')" "^1$"
+fi
 
 echo "--- tokens"
 expect "no token" "$(TOKEN=x req create '{}')" unauthorized
@@ -87,10 +162,11 @@ R=$(req create "$(payload "$(uuid)" "$W/ud-bad")")
 expect "create, unsafe cloud-init still applied" "$(echo "$R" | st)" "^applied"
 expect "  with remarks" "$(sql "select checks::TEXT from requests where id = $(echo "$R" | jq .id)")" "runcmd.*password"
 expect "create" "$(req create "$(payload "$VM" "$W/ud-safe")" | st)" "^applied"
-expect "  disk entry" "$(bao kv get -format=json "wx/disks/vm-$VM" | jq -c '.data.data | {kind, status}')" '"kind":"system","status":"active"'
-expect "  key, 44 base64 characters" "$(bao read -format=json "kv/disk/vm-$VM/key" | jq '.data.data | length')" "^44$"
-HD=$(bao kv get -format=json "wx/attachments/vm-$VM" | jq -r .data.data.host_data)
-expect "  vTPM state key" "$(bao read -format=json "kv/vtpm/$HD/state" | jq '.data.data | length')" "^32$"
+expect "  disk entry" "$(field "disks/vm-$VM" kind) $(field "disks/vm-$VM" status)" "^system active$"
+expect "  key in the key store" "$(keyOf "vm-$VM")" "$KEYRE"
+HD=$(field "attachments/vm-$VM" host_data)
+expect "  vTPM state key, through the KBS" "$(vtpmKey "$HD")" "^[0-9a-f]{64}$"
+expect "  vTPM entry" "$(there "vtpm/$HD")" "^yes$"
 expect "  in the KBS policy" "$(grep -c "vm-$VM" "$POLICY")" "^1$"
 expect "create twice" "$(req create "$(payload "$VM" "$W/ud-safe")" | st)" "rejected.*no system disk yet"
 expect "system disk to another VM" "$(req attach "$(DISK=vm-$VM payload "$(uuid)" "$W/ud-safe" "")" | st)" "rejected.*not a system disk"
@@ -100,15 +176,26 @@ echo "--- volumes"
 VOL=vol-$(uuid)
 expect "volume needs vol-" "$(req create_volume "{\"disk_id\":\"vm-$(uuid)\"}" | st)" "rejected"
 expect "create_volume" "$(req create_volume "{\"disk_id\":\"$VOL\"}" | st)" "^applied"
-expect "  no binding yet" "$(bao kv get "wx/attachments/$VOL" >/dev/null 2>&1 && echo yes || echo no)" "^no$"
+expect "  no binding yet" "$(there "attachments/$VOL")" "^no$"
 expect "attach with another initdata" "$(req attach "$(DISK=$VOL payload "$VM" "$W/ud-bad")" | st)" "rejected.*the VM's own"
 R=$(req attach "$(DISK=$VOL payload "$VM" "$W/ud-safe")")
 expect "attach, no auto rule: pending" "$(echo "$R" | st)" "^pending"
 expect "  control plane cannot decide" "$(cp_ -X POST -d '{"approve":true}' "$A/api/customer/requests/$(echo "$R" | jq .id)")" unauthorized
 expect "  customer approves" "$(decide "$R" true)" "^applied"
-expect "  bound to the VM's HOST_DATA" "$(bao kv get -format=json "wx/attachments/$VOL" | jq -r .data.data.host_data)" "^$HD$"
+expect "  bound to the VM's HOST_DATA" "$(field "attachments/$VOL" host_data)" "^$HD$"
 expect "  decided once only" "$(decide "$R" false)" "^applied"
 expect "detach volume" "$(req detach "{\"disk_id\":\"$VOL\",\"vm_uuid\":\"$VM\"}" | st)" "^applied"
+
+echo "--- the state is signed"
+TV=vol-$(uuid)
+req create_volume "{\"disk_id\":\"$TV\"}" >/dev/null
+expect "an entry as the agent wrote it" "$(field "disks/$TV" status)" "^active$"
+sql "update state set data = '{\"status\":\"active\",\"kind\":\"volume\",\"created\":1}' where key = 'disks/$TV'" >/dev/null
+expect "  changed in the database: not used" "$(req attach "$(DISK=$TV payload "$VM" "$W/ud-safe")" | st)" "rejected.*state readable"
+expect "  and said so" "$(docker logs "$AGENT" 2>&1 | grep -c "disks/$TV is not signed")" "^[1-9]"
+TV2=vol-$(uuid)
+sql "insert into state (key, version, data, mac) values ('disks/$TV2', 1, '{\"status\":\"active\",\"kind\":\"volume\"}', 'vault:v1:AAAA')" >/dev/null
+expect "an entry made in the database: not used" "$(req attach "$(DISK=$TV2 payload "$VM" "$W/ud-safe")" | st)" "rejected.*state readable"
 
 echo "--- a volume as the main disk"
 BV=vol-$(uuid) BVM=$(uuid)
@@ -119,9 +206,9 @@ expect "boot volume, VM with a system disk" "$(req attach "$(bootPayload "$VM" n
 R=$(req attach "$(bootPayload "$BVM" new)")
 expect "boot volume as new" "$(echo "$R" | st)" "^pending"
 expect "  customer approves" "$(decide "$R" true)" "^applied"
-BHD=$(bao kv get -format=json "wx/attachments/$BV" | jq -r .data.data.host_data)
-expect "  with the VM's vTPM" "$(bao read -format=json "kv/vtpm/$BHD/state" | jq '.data.data | length')" "^32$"
-expect "  marked as booted from" "$(bao kv get -format=json "wx/disks/$BV" | jq -r .data.data.booted)" "^true$"
+BHD=$(field "attachments/$BV" host_data)
+expect "  with the VM's vTPM" "$(vtpmKey "$BHD")" "^[0-9a-f]{64}$"
+expect "  marked as booted from" "$(field "disks/$BV" booted)" "^true$"
 req detach "{\"disk_id\":\"$BV\",\"vm_uuid\":\"$BVM\"}" >/dev/null
 expect "  the VM goes: no shredding asked for a volume" "$(sql "select count(*) from requests where type = 'delete_disk' and payload->>'disk_id' = '$BV'")" "^0$"
 BVM2=$(uuid)
@@ -129,13 +216,10 @@ expect "booted volume again as new" "$(req attach "$(bootPayload "$BVM2" new)" |
 expect "booted volume to a new VM as existing" "$(req attach "$(bootPayload "$BVM2" existing)" | st)" "^pending"
 
 echo "--- auto rules"
-jq -n --arg k "$KEY" --arg c "$CHIP" --arg hv "$HV" \
-  '{auto_attach: true, auto_add_host: true, allowed_ssh_keys: [$k], host_pool: [{hv_uuid: $hv, chip_id: $c, name: "hv1"}]}' \
-  | bao kv put wx/settings - >/dev/null 2>&1 || {
-  jq -n --arg k "$KEY" --arg c "$CHIP" --arg hv "$HV" \
-    '{auto_attach: true, auto_add_host: true, allowed_ssh_keys: [$k], host_pool: [{hv_uuid: $hv, chip_id: $c, name: "hv1"}]}' > "$W/s.json"
-  docker cp -q "$W/s.json" "$BAO:/tmp/s.json" && bao kv put wx/settings @/tmp/s.json >/dev/null
-}
+expect "auto rules on (UI)" "$(uiSet -d section=auto -d auto_attach=on -d auto_add_host=on)" "^303$"
+expect "host pool (UI)" "$(uiSet -d section=pool --data-urlencode "host_pool=$HV $CHIP hv1")" "^303$"
+expect "SSH keys (UI)" "$(uiSet -d section=keys --data-urlencode "allowed_ssh_keys=$KEY")" "^303$"
+expect "  in the state" "$(field settings auto_attach) $(sql "select data::JSONB->'host_pool'->0->>'name' from state where key = 'settings'")" "^true hv1$"
 expect "safe cloud-init, host in pool: automatic" "$(req attach "$(DISK=$VOL payload "$VM" "$W/ud-safe")" | st)" "^applied"
 req detach "{\"disk_id\":\"$VOL\",\"vm_uuid\":\"$VM\"}" >/dev/null
 MIXED=$(uuid)
@@ -153,8 +237,8 @@ expect "add_host from the pool: automatic" "$(req add_host "{\"vm_uuid\":\"$VM\"
 echo "--- reprovision"
 RVM=$(uuid)
 req create "$(payload "$RVM" "$W/ud-safe")" >/dev/null
-OLDHD=$(bao kv get -format=json "wx/attachments/vm-$RVM" | jq -r .data.data.host_data)
-K0=$(bao read -format=json "kv/disk/vm-$RVM/key" | jq -c .data.data)
+OLDHD=$(field "attachments/vm-$RVM" host_data)
+K0=$(keyOf "vm-$RVM") V0=$(vtpmKey "$OLDHD")
 printf '#cloud-config\nhostname: neu\nusers:\n  - name: tobi\n    ssh_authorized_keys:\n      - %s\n' "$KEY" > "$W/ud-new"
 expect "another VM's disk" "$(req reprovision "$(DISK=vm-$RVM payload "$(uuid)" "$W/ud-new" "vm-$RVM:new")" | st)" "rejected.*attached to this VM"
 expect "named as existing" "$(req reprovision "$(payload "$RVM" "$W/ud-new" "vm-$RVM:existing")" | st)" "rejected.*as 'new'"
@@ -162,11 +246,14 @@ R=$(req reprovision "$(payload "$RVM" "$W/ud-new")")
 expect "never automatic, even with auto rules" "$(echo "$R" | st)" "^pending"
 expect "  warns what it does" "$(sql "select checks::TEXT from requests where id = $(echo "$R" | jq .id)")" "gone for good"
 expect "  customer approves" "$(decide "$R" true)" "^applied"
-expect "  disk key overwritten" "$([ "$K0" != "$(bao read -format=json "kv/disk/vm-$RVM/key" | jq -c .data.data)" ] && echo yes)" "^yes$"
-expect "  old vTPM gone" "$(bao kv get "wx/vtpm/$OLDHD" >/dev/null 2>&1 && echo yes || echo no)" "^no$"
-NEWHD=$(bao kv get -format=json "wx/attachments/vm-$RVM" | jq -r .data.data.host_data)
+K1=$(keyOf "vm-$RVM")
+expect "  a new disk key" "$K1" "$KEYRE"
+[ "$KS" = openbao ] && expect "  not the old one" "$([ "$K0" != "$K1" ] && echo yes)" "^yes$"
+expect "  old vTPM entry gone" "$(there "vtpm/$OLDHD")" "^no$"
+expect "  old vTPM state key overwritten" "$([ "$V0" != "$(vtpmKey "$OLDHD")" ] && echo yes)" "^yes$"
+NEWHD=$(field "attachments/vm-$RVM" host_data)
 expect "  bound to the new initdata" "$([ "$NEWHD" != "$OLDHD" ] && echo yes)" "^yes$"
-expect "  with a vTPM of its own" "$(bao read -format=json "kv/vtpm/$NEWHD/state" | jq '.data.data | length')" "^32$"
+expect "  with a vTPM of its own" "$(vtpmKey "$NEWHD")" "^[0-9a-f]{64}$"
 DV=vol-$(uuid)
 req create_volume "{\"disk_id\":\"$DV\"}" >/dev/null
 expect "data volume attached to it" "$(req attach "$(DISK=$DV payload "$RVM" "$W/ud-new")" | st)" "^applied"
@@ -195,15 +282,16 @@ done
 
 echo "--- the VM goes"
 expect "detach by vm_uuid" "$(req detach "{\"vm_uuid\":\"$VM\"}" | st)" "^applied"
-expect "  binding gone" "$(bao kv get "wx/attachments/vm-$VM" >/dev/null 2>&1 && echo yes || echo no)" "^no$"
-expect "  key kept" "$(bao read -format=json "kv/disk/vm-$VM/key" | jq '.data.data | length')" "^44$"
+expect "  binding gone" "$(there "attachments/vm-$VM")" "^no$"
+expect "  key kept" "$(keyOf "vm-$VM")" "$KEYRE"
 ID=$(sql "select id from requests where type = 'delete_disk' and payload->>'disk_id' = 'vm-$VM' and status = 'pending'")
 expect "  customer asked to shred" "$ID" "^[0-9]+$"
-K0=$(bao read -format=json "kv/disk/vm-$VM/key" | jq -c .data.data)
+V0=$(vtpmKey "$HD")
 expect "customer approves" "$(cu -X POST -d '{"approve":true}' "$A/api/customer/requests/$ID" | st)" "^applied"
-expect "  key overwritten" "$([ "$K0" != "$(bao read -format=json "kv/disk/vm-$VM/key" | jq -c .data.data)" ] && echo yes)" "^yes$"
-expect "  disk deleted" "$(bao kv get -format=json "wx/disks/vm-$VM" | jq -r .data.data.status)" "^deleted$"
-expect "  vTPM state shredded" "$(bao kv get "wx/vtpm/$HD" >/dev/null 2>&1 && echo yes || echo no)" "^no$"
+expect "  key destroyed" "$(keyOf "vm-$VM")" "^$"
+expect "  disk deleted" "$(field "disks/vm-$VM" status)" "^deleted$"
+expect "  vTPM entry gone" "$(there "vtpm/$HD")" "^no$"
+expect "  vTPM state key overwritten" "$([ "$V0" != "$(vtpmKey "$HD")" ] && echo yes)" "^yes$"
 
 echo "--- customer API"
 expect "lease reset, bad ID" "$(cu -X POST "$A/api/customer/disks/x/lease/reset")" "bad disk ID"

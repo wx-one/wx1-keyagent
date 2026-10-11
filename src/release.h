@@ -6,7 +6,8 @@
  *   2. /v1/attest     guest report (VMPL2), SVSM report (VMPL0, vTPM EK),
  *                     AK, initdata, the guest's public key -> credential
  *   3. /v1/release    the opened credential, TPM quote, replay stand
- *                     -> the disk key, encrypted to the guest's key
+ *                     -> the disk key, wrapped by the key store for the
+ *                        guest's key (wrap.h); the agent never holds it
  *
  * What is checked:
  *  - both SNP reports signed by AMD (pinned ARK -> ASK -> VCEK), same chip,
@@ -21,6 +22,9 @@
  *    command line, kernel/initrd) in an approved reference set
  *  - replay stand in the vTPM at least the last confirmed one
  *  - lease: per disk at most one REPORT_ID holds the key at a time
+ *  - the state a disk must have is there: its entry, and for a persistent
+ *    vTPM the VM's vTPM entry - an entry taken out of the database must not
+ *    turn into "no rule", "no EK bound yet" or "no replay stand yet"
  */
 #ifndef WX_RELEASE_H
 #define WX_RELEASE_H
@@ -193,7 +197,7 @@ static int inWindow(const char *window, time_t now) {
 static const char *admit(const char *diskId, const char *reportId, const char *chipId,
                          tpmPcrs_t *pcrs, char *why, size_t room) {
 
-  bao_entry_t disk = storeGet("disks", diskId);
+  entry_t disk = storeGet("disks", diskId);
   char mode[16], window[64];
 
   text_t m = TEXT`${disk.found ? disk.payload().get("mode").text() : ""}`;
@@ -203,7 +207,11 @@ static const char *admit(const char *diskId, const char *reportId, const char *c
   disk.release();
 
   if (disk.failed)
-    return "state not readable (OpenBao)";
+    return "state not readable (database)";
+
+  /* every disk the agent made has its entry; none means it was taken out */
+  if (!disk.found)
+    return "disk unknown (no state entry)";
 
   /* text() answers "" for an absent key, never NULL: no mode is "always" */
   if (mode[0] == 0)
@@ -263,7 +271,7 @@ static const char *admit(const char *diskId, const char *reportId, const char *c
   snprintf(chain, sizeof chain, "{\"4\":\"%s\",\"8\":\"%s\",\"9\":\"%s\"}", p4, p8, p9);
   json_t pcrSet = meta_toJSON(chain);
 
-  bao_entry_t att = storeGet("attachments", diskId);
+  entry_t att = storeGet("attachments", diskId);
   const char *vm = att.found ? att.payload().get("vm_uuid").text() : "";
   const char *vmName = att.found ? att.payload().get("vm_name").text() : "";
   json_t p = {disk_id: diskId, report_id: reportId, chip_id: chipId, reason: reason, vm_uuid: vm,
@@ -298,35 +306,6 @@ static const char *admit(const char *diskId, const char *reportId, const char *c
   t2.into(why, room);
 
   return why;
-}
-
-/* ------------------------------------------------------------ the answer */
-
-/** RSA-OAEP (SHA-256) to the guest's one-off key, base64 into `out`. */
-static bool sealToGuest(const unsigned char *der, size_t derLength, const unsigned char *data,
-                        size_t length, char *out, size_t room) {
-
-  const unsigned char *p = der;
-  EVP_PKEY *key = d2i_PUBKEY(NULL, &p, (long)derLength);
-  EVP_PKEY_CTX *ctx = key != NULL ? EVP_PKEY_CTX_new(key, NULL) : NULL;
-  unsigned char sealed[1024];
-  size_t sealedLength = sizeof sealed;
-
-  bool good = ctx != NULL && p == der + derLength && EVP_PKEY_get_base_id(key) == EVP_PKEY_RSA &&
-              EVP_PKEY_get_bits(key) >= 3072 && EVP_PKEY_encrypt_init(ctx) > 0 &&
-              EVP_PKEY_CTX_set_rsa_padding(ctx, RSA_PKCS1_OAEP_PADDING) > 0 &&
-              EVP_PKEY_CTX_set_rsa_oaep_md(ctx, EVP_sha256()) > 0 &&
-              EVP_PKEY_CTX_set_rsa_mgf1_md(ctx, EVP_sha256()) > 0 &&
-              EVP_PKEY_encrypt(ctx, sealed, &sealedLength, data, length) > 0 &&
-              (sealedLength + 2) / 3 * 4 + 1 <= room;
-
-  if (good)
-    toBase64(sealed, sealedLength, out);
-
-  EVP_PKEY_CTX_free(ctx);
-  EVP_PKEY_free(key);
-
-  return good;
 }
 
 /* -------------------------------------------------------------- the calls */
@@ -515,14 +494,14 @@ static void attestStep(release_t *out, json_t req, attestIn_t *in) {
   if (strcmp(initdataHash, guest.hostData) != 0)
     return out.refuse(403, "initdata does not match HOST_DATA");
 
-  bao_entry_t att = storeGet("attachments", out->disk);
+  entry_t att = storeGet("attachments", out->disk);
   bool bound = att.found && strcmp(att.payload().get("host_data").text() ?: "", guest.hostData) == 0;
   bool hostOk = att.found && chipAllowed(att.payload(), guest.chipId);
   bool failed = att.failed, attached = att.found;
   att.release();
 
   if (failed)
-    return out.refuse(503, "state not readable (OpenBao)");
+    return out.refuse(503, "state not readable (database)");
   if (!attached)
     return out.refuse(403, "disk attached to no VM (no binding)");
   if (!bound)
@@ -577,9 +556,18 @@ static void attestStep(release_t *out, json_t req, attestIn_t *in) {
   /* the vTPM's identity: with a persistent vTPM the EK stays the same across
      boots. Another one means its state was lost or swapped, or the SVSM fell
      back to an ephemeral vTPM (it does when it does not get its state key) */
-  if (!storeEk(guest.hostData, bound_, sizeof bound_)) {
+  int vtpmEntry = storeEk(guest.hostData, bound_, sizeof bound_);
+
+  if (vtpmEntry < 0) {
     free(cred.at);
-    return out.refuse(503, "state not readable (OpenBao)");
+    return out.refuse(503, "state not readable (database)");
+  }
+
+  /* made with the binding of the main disk; without it the EK and the replay
+     stand would start anew, which only the customer may decide (unbind) */
+  if (vtpmEntry == 0 && persistent) {
+    free(cred.at);
+    return out.refuse(403, "the VM's vTPM entry is missing (state changed outside the agent?)");
   }
 
   if (bound_[0] != 0 && strcmp(bound_, ekHash) != 0) {
@@ -709,6 +697,11 @@ static void releaseStep(release_t *out, json_t req, session_t *s, blob_t *parts)
   snprintf(out->ctx, sizeof out->ctx, "{\"chip_id\":\"%s\",\"report_id\":\"%s\"}",
            s->chipId, s->reportId);
 
+  /* an older client takes the key only as plain RSA-OAEP, which needs it in
+     the clear here; it has to say it opens the wrapped form */
+  if (!s->renew && strcmp(req.get("wrap").text() ?: "", wrapName) != 0)
+    return out.refuse(400, "the guest's wx-release-client is too old: the key comes wrapped (rsa-aes-kwp)");
+
   blob_t *secret = &parts[0], *msg = &parts[1], *sig = &parts[2], *pcrFile = &parts[3];
   blob_t *nvAtt = &parts[4], *nvSig = &parts[5];
 
@@ -772,7 +765,7 @@ static void releaseStep(release_t *out, json_t req, session_t *s, blob_t *parts)
     return out.refuse(403, "boot chain (PCR 4/8/9) not in the approved reference values");
 
   /* still bound: a detach between attest and now takes effect */
-  bao_entry_t att = storeGet("attachments", s->disk);
+  entry_t att = storeGet("attachments", s->disk);
   bool bound = att.found && strcmp(att.payload().get("host_data").text() ?: "", s->hostData) == 0 &&
                chipAllowed(att.payload(), s->chipId);
   att.release();
@@ -799,7 +792,7 @@ static void releaseStep(release_t *out, json_t req, session_t *s, blob_t *parts)
     replay_t stand = storeReplay(s->hostData);
 
     if (stand.failed)
-      return out.refuse(503, "state not readable (OpenBao)");
+      return out.refuse(503, "state not readable (database)");
 
     if (stand.found && stand.nvName[0] != 0 && nv < 0)
       return out.refuse(403, "replay stand missing (replay protection)");
@@ -812,7 +805,7 @@ static void releaseStep(release_t *out, json_t req, session_t *s, blob_t *parts)
     bool due = !s->renew && !s->ending;
 
     if (!due && stand.found) {
-      bao_entry_t disk = storeGet("disks", s->disk);
+      entry_t disk = storeGet("disks", s->disk);
       long interval = disk.found ? disk.payload().get("replay_interval").number() : 0;
       disk.release();
       due = interval > 0 && (long)time(NULL) - stand.at >= interval;
@@ -835,7 +828,7 @@ static void releaseStep(release_t *out, json_t req, session_t *s, blob_t *parts)
     /* a clean shutdown: the instance gives its lease back itself */
     storeEndLease(s->disk, s->reportId);
     if (next > 0 && !storeReplayConfirm(s->hostData, nvName, nv, next))
-      return out.refuse(503, "cannot confirm the replay stand (OpenBao)");
+      return out.refuse(503, "cannot confirm the replay stand (database)");
     buf_t__put(&out->json, "{\"ended\":true");
     if (next > 0)
       buf_t__printf(&out->json, ",\"nv_next\":\"%s\"", nextB64);
@@ -855,7 +848,7 @@ static void releaseStep(release_t *out, json_t req, session_t *s, blob_t *parts)
     storePinEk(s->hostData, s->ek);
 
   if (next > 0 && !storeReplayConfirm(s->hostData, nvName, nv, next))
-    return out.refuse(503, "cannot confirm the replay stand (OpenBao)");
+    return out.refuse(503, "cannot confirm the replay stand (database)");
 
   long expires = (long)time(NULL) + leaseTtl();
 
@@ -867,24 +860,15 @@ static void releaseStep(release_t *out, json_t req, session_t *s, blob_t *parts)
     return;
   }
 
-  char keyPath[80], sealed[1400];
-  unsigned char key[128];
-  text_t kp = TEXT`disk/${s->disk}/key`;
-  kp.into(keyPath, sizeof keyPath);
+  char wrapped[1400];
 
-  long keyLength = baoGetKey(keyPath, key, sizeof key);
+  wrong = keyWrap(s->disk, s->guestPub, (size_t)s->guestPubLength, wrapped, sizeof wrapped);
 
-  if (keyLength <= 0)
-    return out.refuse(503, "disk key not readable (OpenBao)");
+  if (wrong != NULL)
+    return out.refuse(strncmp(wrong, "guest key", 9) == 0 ? 403 : 503, wrong);
 
-  bool sealedOk = sealToGuest(s->guestPub, (size_t)s->guestPubLength, key, (size_t)keyLength,
-                              sealed, sizeof sealed);
-  OPENSSL_cleanse(key, sizeof key);
-
-  if (!sealedOk)
-    return out.refuse(403, "guest key unusable (want RSA 3072 or more)");
-
-  buf_t__printf(&out->json, "{\"key\":\"%s\",\"lease_expires\":%ld", sealed, expires);
+  buf_t__printf(&out->json, "{\"key\":\"%s\",\"wrap\":\"%s\",\"oaep\":\"%s\",\"lease_expires\":%ld",
+                wrapped, wrapName, keyOaep(), expires);
   if (next > 0)
     buf_t__printf(&out->json, ",\"nv_next\":\"%s\"", nextB64);
   buf_t__put(&out->json, "}");
