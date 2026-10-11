@@ -67,10 +67,25 @@ jobs:
           release=$(basename out/wx1-keyagent-*.tar.gz .tar.gz)
           echo "RELEASE=$release" >>"$GITHUB_ENV"
           docker build -q -f ci/Dockerfile.release --build-arg RELEASE="$release" -t wx1-keyagent:ci out
+      - name: core dumps of the agent, should a worker crash
+        run: |
+          mkdir -m 1777 /tmp/cores
+          sudo sysctl -w kernel.core_pattern=/tmp/cores/core.%e.%p
       - name: test/api.sh against the image
-        run: RACE_ROUNDS=20 IMAGE=wx1-keyagent:ci NO_BUILD=1 test/local.sh
+        run: RACE_ROUNDS=20 IMAGE=wx1-keyagent:ci NO_BUILD=1 CORES=/tmp/cores test/local.sh
       - name: test/api.sh with an HSM as the key store (SoftHSM2 over PKCS#11)
-        run: KEYSTORE=pkcs11 NO_BUILD=1 test/local.sh
+        run: KEYSTORE=pkcs11 NO_BUILD=1 CORES=/tmp/cores test/local.sh
+      - name: the cores and the binary they came from
+        if: failure()
+        run: |
+          sudo chmod -R a+r /tmp/cores
+          tar -xzf out/$RELEASE.tar.gz -C /tmp/cores $RELEASE/sbin/nginx
+          ls -la /tmp/cores
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: cores
+          path: /tmp/cores
       - name: image SBOM
         run: |
           sudo apt-get install -y -qq jq >/dev/null

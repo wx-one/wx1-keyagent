@@ -6,6 +6,8 @@
 #   NO_BUILD=1 test/local.sh          uses wx/wx1-keyagent as it is
 #   KEYSTORE=pkcs11 test/local.sh     a SoftHSM2 token as the key store instead of
 #                                     OpenBao (test/Dockerfile.softhsm, from out/)
+#   CORES=<dir> test/local.sh         the agent may dump core, into <dir> (the host's
+#                                     kernel.core_pattern has to point there, as in CI)
 #
 # With OpenBao the agent finds an installation of 0.0.5 to take over: state
 # in wx/, a disk key in kv/disk/ (src/legacy.h); api.sh checks what became of it.
@@ -94,7 +96,9 @@ if [ "$KEYSTORE" = openbao ]; then
   AGENT_ENV=(-e WX_OPENBAO_URL=http://wx1ka-test-bao:8200)
 fi
 
-docker run -d --name wx1ka-test-agent --network $NET -p 127.0.0.1::8095 \
+CORE_ARGS=()
+[ -n "${CORES:-}" ] && CORE_ARGS=(--ulimit core=-1 -v "$CORES:$CORES")
+docker run -d --name wx1ka-test-agent --network $NET -p 127.0.0.1::8095 "${CORE_ARGS[@]}" \
   -v "$W/secrets":/secrets:ro -v "$W/refs":/refs:ro -v "$W/kds":/kds -v "$W/tls":/tls:ro \
   -e WX_TLS_CERT=/tls/agent.pem -e WX_TLS_KEY=/tls/agent.key \
   -e WX_CP_CLIENT_CA=/tls/ca.pem -e WX_CP_CLIENT_SUBJECT=/CN=control-plane \
